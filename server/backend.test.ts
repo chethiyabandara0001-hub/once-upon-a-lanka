@@ -462,7 +462,7 @@ async function runBackendVerificationTests(): Promise<void> {
     'Skipping user (Amaya) must automatically re-enter queue:waiting'
   );
 
-  // 9h. Pair again, verify webrtc:ready relay, and verify abrupt WebSocket disconnect cleanup
+  // 9h. Pair again, verify webrtc:ready relay, ping/pong heartbeat, payload validation, and disconnect cleanup
   kavanClient.send(JSON.stringify({ type: 'queue:join', mode: 'video' }));
   const secondMatchMsg = amayaClient.receivedMessages.at(-1) as {
     type: string;
@@ -486,13 +486,127 @@ async function runBackendVerificationTests(): Promise<void> {
     'Amaya must receive webrtc:ready signal from responder Kavan'
   );
 
+  // Verify ping -> pong heartbeat
+  kavanClient.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+  assert.equal(
+    kavanClient.receivedMessages.at(-1)?.type,
+    'pong',
+    'Durable Object must respond to ping with pong heartbeat'
+  );
+
+  // Verify invalid message type is rejected safely without closing the socket
+  kavanClient.send(JSON.stringify({ type: 'unsupported:malicious:event' }));
+  assert.equal(
+    kavanClient.receivedMessages.at(-1)?.type,
+    'error:invalid-payload',
+    'Durable Object must safely reject unknown message types with error:invalid-payload'
+  );
+  assert.equal(kavanClient.closed, false, 'Kavan WebSocket must remain open after invalid message');
+
+  // Verify that when Amaya disconnects, Kavan receives stranger:disconnected AND Kavan's WebSocket stays OPEN
   amayaClient.close(1001, 'Tab closed');
   assert.equal(
     kavanClient.receivedMessages.at(-1)?.type,
     'stranger:disconnected',
     'Kavan must immediately receive stranger:disconnected when Amaya closes her WebSocket'
   );
+  assert.equal(
+    kavanClient.closed,
+    false,
+    'Kavan signaling WebSocket must remain OPEN after partner Amaya disconnects'
+  );
+
+  // Verify Kavan can immediately rejoin the queue on the same open WebSocket
+  kavanClient.send(JSON.stringify({ type: 'queue:join', mode: 'video' }));
+  assert.equal(
+    kavanClient.receivedMessages.at(-1)?.type,
+    'queue:waiting',
+    'Kavan must be able to rejoin queue on existing open WebSocket after partner disconnect'
+  );
   kavanClient.close(1000, 'Done');
+
+  // 9i. Verify Cloudflare Durable Object WebSocket Hibernation State Reconstruction
+  const hibernatedServerSockets: Array<
+    MockCloudflareSocket & {
+      attachment?: unknown;
+      serializeAttachment: (data: unknown) => void;
+      deserializeAttachment: () => unknown;
+    }
+  > = [];
+
+  const hibernatableState = {
+    id: 'hibernation-test-pool',
+    acceptWebSocket: (ws: MockCloudflareSocket) => {
+      ws.accepted = true;
+      const hWs = ws as MockCloudflareSocket & {
+        attachment?: unknown;
+        serializeAttachment: (data: unknown) => void;
+        deserializeAttachment: () => unknown;
+      };
+      hWs.serializeAttachment = (data: unknown) => {
+        hWs.attachment = JSON.parse(JSON.stringify(data));
+      };
+      hWs.deserializeAttachment = () =>
+        hWs.attachment ? JSON.parse(JSON.stringify(hWs.attachment)) : null;
+      hibernatedServerSockets.push(hWs);
+    },
+    getWebSockets: () => hibernatedServerSockets.filter((s) => !s.closed),
+  };
+
+  // Instance #1 accepts two connections and matches them
+  const doBeforeHibernation = new MatchmakerDurableObject(hibernatableState, {});
+  const hibAmayaRes = (await doBeforeHibernation.fetch(
+    new Request(
+      `https://once-upon-a-lanka.workers.dev/ws?token=${encodeURIComponent(
+        loginData.token
+      )}&clientId=tab_amaya_hib`,
+      { headers: { Upgrade: 'websocket' } }
+    )
+  )) as Response & { webSocket?: MockCloudflareSocket };
+  const hibKavanRes = (await doBeforeHibernation.fetch(
+    new Request(
+      `https://once-upon-a-lanka.workers.dev/ws?token=${encodeURIComponent(
+        kavanLoginData.token
+      )}&clientId=tab_kavan_hib`,
+      { headers: { Upgrade: 'websocket' } }
+    )
+  )) as Response & { webSocket?: MockCloudflareSocket };
+
+  const hibAmayaServer = hibernatedServerSockets[0];
+  const hibKavanServer = hibernatedServerSockets[1];
+  const hibAmayaClient = hibAmayaRes.webSocket!;
+  const hibKavanClient = hibKavanRes.webSocket!;
+
+  await doBeforeHibernation.webSocketMessage(
+    hibAmayaServer as unknown as WebSocket,
+    JSON.stringify({ type: 'queue:join', mode: 'video' })
+  );
+  await doBeforeHibernation.webSocketMessage(
+    hibKavanServer as unknown as WebSocket,
+    JSON.stringify({ type: 'queue:join', mode: 'video' })
+  );
+
+  const hibMatchMsg = hibAmayaClient.receivedMessages.at(-1) as {
+    type: string;
+    sessionId: string;
+  };
+  assert.equal(hibMatchMsg.type, 'match:found', 'Hibernation test users must match');
+
+  // Simulate Cloudflare evicting the Durable Object from memory and waking a brand-new instance
+  const doAfterWakeup = new MatchmakerDurableObject(hibernatableState, {});
+  await doAfterWakeup.webSocketMessage(
+    hibAmayaServer as unknown as WebSocket,
+    JSON.stringify({
+      type: 'webrtc:sdp',
+      sessionId: hibMatchMsg.sessionId,
+      data: { type: 'offer', sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n' },
+    })
+  );
+  assert.equal(
+    hibKavanClient.receivedMessages.at(-1)?.type,
+    'webrtc:sdp',
+    'Woken Durable Object must reconstruct active session from WebSocket attachments and relay SDP Offer'
+  );
 
   // 10. Verify GET /api/webrtc/ice-servers (Free STUN + Optional TURN + 640x360@24fps / 500 Kbps profile)
   const iceReq = new Request('https://once-upon-a-lanka.workers.dev/api/webrtc/ice-servers', {

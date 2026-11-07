@@ -8,6 +8,7 @@ const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 export interface RtcSocketClient {
   id: string;
+  clientId: string;
   userId: string;
   ephemeralPeerId: string;
   displayName: string;
@@ -32,10 +33,25 @@ interface ActiveSession {
   userB: RtcSocketClient;
 }
 
+const ALLOWED_CLIENT_TYPES = new Set([
+  'ping',
+  'queue:join',
+  'queue:leave',
+  'stranger:skip',
+  'stranger:end',
+  'webrtc:sdp',
+  'webrtc:ice',
+  'webrtc:ready',
+  'stranger:message',
+  'stranger:typing',
+  'stranger:media-state',
+]);
+
 class RealtimeMatchmakingCoordinator {
-  private clientsByUser = new Map<string, RtcSocketClient>();
+  private clientsById = new Map<string, RtcSocketClient>();
+  private tabKeyToClientId = new Map<string, string>();
   private waitingQueue = new Map<string, QueuedEntry>();
-  private userToSessionId = new Map<string, string>();
+  private clientToSessionId = new Map<string, string>();
   private activeSessions = new Map<string, ActiveSession>();
 
   public attachToServer(server: http.Server): void {
@@ -46,6 +62,7 @@ class RealtimeMatchmakingCoordinator {
       }
 
       const token = url.searchParams.get('token') || '';
+      const rawClientId = (url.searchParams.get('clientId') || '').trim();
       const tokenHash = token ? hashSessionToken(token) : '';
       const now = new Date();
       const session = db.state.user_sessions.find(
@@ -100,8 +117,12 @@ class RealtimeMatchmakingCoordinator {
         .filter((i) => interestIds.includes(i.id))
         .map((i) => i.label_en);
 
+      const connectionId = `ws_${crypto.randomUUID().slice(0, 10)}`;
+      const clientId = rawClientId ? rawClientId.slice(0, 48) : connectionId;
+
       const client: RtcSocketClient = {
-        id: `ws_${crypto.randomUUID().slice(0, 10)}`,
+        id: connectionId,
+        clientId,
         userId: user.id,
         ephemeralPeerId: `peer_${crypto.randomUUID().slice(0, 8)}`,
         displayName: user.display_name.split(' ')[0] || user.display_name,
@@ -118,17 +139,24 @@ class RealtimeMatchmakingCoordinator {
         },
       };
 
-      // Close any stale socket for this user
-      const existingClient = this.clientsByUser.get(user.id);
-      if (existingClient && existingClient.id !== client.id) {
-        this.leaveAll(user.id, 'disconnect');
-        existingClient.close();
+      // Close stale socket only if reconnecting from the exact same browser tab
+      const tabKey = `${user.id}:${clientId}`;
+      const priorConnId = this.tabKeyToClientId.get(tabKey);
+      if (priorConnId && priorConnId !== client.id) {
+        const existingClient = this.clientsById.get(priorConnId);
+        if (existingClient) {
+          this.leaveConnection(priorConnId, 'disconnect');
+          this.clientsById.delete(priorConnId);
+          existingClient.close();
+        }
       }
 
-      this.clientsByUser.set(user.id, client);
+      this.clientsById.set(client.id, client);
+      this.tabKeyToClientId.set(tabKey, client.id);
 
       client.send({
         type: 'connection:established',
+        connectionId: client.id,
         ephemeralPeerId: client.ephemeralPeerId,
         stats: this.getPublicOperationalStats(),
       });
@@ -139,56 +167,73 @@ class RealtimeMatchmakingCoordinator {
 
   public getPublicOperationalStats() {
     return {
-      connectedSockets: this.clientsByUser.size,
+      connectedSockets: this.clientsById.size,
       waitingInQueue: this.waitingQueue.size,
       activeStrangerSessions: this.activeSessions.size,
     };
   }
 
   public notifyDirectMessage(recipientUserId: string, payload: Record<string, unknown>): void {
-    const client = this.clientsByUser.get(recipientUserId);
-    if (client) {
-      client.send({
-        type: 'dm:received',
-        ...payload,
-      });
+    for (const client of this.clientsById.values()) {
+      if (client.userId === recipientUserId) {
+        client.send({
+          type: 'dm:received',
+          ...payload,
+        });
+      }
     }
   }
 
   public forceDisconnectUser(userId: string): void {
-    this.leaveAll(userId, 'disconnect');
-    const client = this.clientsByUser.get(userId);
-    if (client) {
-      client.send({ type: 'account:moderated' });
-      client.close();
-      this.clientsByUser.delete(userId);
+    for (const [connId, client] of this.clientsById.entries()) {
+      if (client.userId === userId) {
+        this.leaveConnection(connId, 'disconnect');
+        client.send({ type: 'account:moderated' });
+        client.close();
+        this.clientsById.delete(connId);
+      }
     }
   }
 
   private handleClientMessage(client: RtcSocketClient, msg: Record<string, unknown>): void {
-    const type = String(msg.type || '');
+    const type = String(msg.type || '').trim();
+    if (!ALLOWED_CLIENT_TYPES.has(type)) {
+      client.send({
+        type: 'error:invalid-payload',
+        message: `Unsupported message type: ${type || 'empty'}`,
+      });
+      return;
+    }
+
+    if (type === 'ping') {
+      client.send({
+        type: 'pong',
+        timestamp: Date.now(),
+      });
+      return;
+    }
 
     if (type === 'queue:join') {
-      const mode: 'video' | 'text' = msg.mode === 'video' ? 'video' : 'text';
+      const mode: 'video' | 'text' = msg.mode === 'text' ? 'text' : 'video';
       this.enqueueAndMatch(client, mode);
       return;
     }
 
     if (type === 'queue:leave') {
-      this.leaveAll(client.userId, 'end');
+      this.leaveConnection(client.id, 'end');
       client.send({ type: 'queue:left' });
       return;
     }
 
     if (type === 'stranger:skip') {
-      const mode: 'video' | 'text' = msg.mode === 'video' ? 'video' : 'text';
-      this.leaveAll(client.userId, 'skip');
+      const mode: 'video' | 'text' = msg.mode === 'text' ? 'text' : 'video';
+      this.leaveConnection(client.id, 'skip');
       this.enqueueAndMatch(client, mode);
       return;
     }
 
     if (type === 'stranger:end') {
-      this.leaveAll(client.userId, 'end');
+      this.leaveConnection(client.id, 'end');
       client.send({ type: 'stranger:ended' });
       return;
     }
@@ -202,14 +247,13 @@ class RealtimeMatchmakingCoordinator {
       type === 'stranger:media-state'
     ) {
       const sessionId = String(msg.sessionId || '');
-      const activeSessionId = this.userToSessionId.get(client.userId);
+      const activeSessionId = this.clientToSessionId.get(client.id);
       if (!activeSessionId || activeSessionId !== sessionId) return;
 
       const session = this.activeSessions.get(activeSessionId);
       if (!session) return;
 
-      const partner =
-        session.userA.userId === client.userId ? session.userB : session.userA;
+      const partner = session.userA.id === client.id ? session.userB : session.userA;
 
       partner.send({
         type,
@@ -222,32 +266,36 @@ class RealtimeMatchmakingCoordinator {
   }
 
   private enqueueAndMatch(client: RtcSocketClient, mode: 'video' | 'text'): void {
-    // Enforce atomic single-session invariant
-    this.leaveAll(client.userId, 'skip');
+    this.leaveConnection(client.id, 'skip');
 
     let bestCandidate: QueuedEntry | null = null;
-    let bestOverlap = -1;
+    let bestScore = -1;
 
     for (const candidate of this.waitingQueue.values()) {
-      if (candidate.client.userId === client.userId) continue;
+      if (candidate.client.id === client.id) continue;
       if (candidate.mode !== mode) continue;
 
-      if (db.isBlockedBetween(client.userId, candidate.client.userId)) {
+      if (
+        candidate.client.userId !== client.userId &&
+        db.isBlockedBetween(client.userId, candidate.client.userId)
+      ) {
         continue;
       }
 
       const overlap = candidate.client.interests.filter((i) =>
         client.interests.includes(i)
       ).length;
+      const distinctBonus = candidate.client.userId !== client.userId ? 1000 : 0;
+      const score = distinctBonus + overlap;
 
-      if (overlap > bestOverlap) {
-        bestOverlap = overlap;
+      if (score > bestScore) {
+        bestScore = score;
         bestCandidate = candidate;
       }
     }
 
     if (!bestCandidate) {
-      this.waitingQueue.set(client.userId, {
+      this.waitingQueue.set(client.id, {
         client,
         mode,
         joinedAt: Date.now(),
@@ -261,7 +309,7 @@ class RealtimeMatchmakingCoordinator {
       return;
     }
 
-    this.waitingQueue.delete(bestCandidate.client.userId);
+    this.waitingQueue.delete(bestCandidate.client.id);
 
     const sessionId = `ouat_live_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const session: ActiveSession = {
@@ -273,8 +321,8 @@ class RealtimeMatchmakingCoordinator {
     };
 
     this.activeSessions.set(sessionId, session);
-    this.userToSessionId.set(bestCandidate.client.userId, sessionId);
-    this.userToSessionId.set(client.userId, sessionId);
+    this.clientToSessionId.set(bestCandidate.client.id, sessionId);
+    this.clientToSessionId.set(client.id, sessionId);
 
     const sharedInterests = bestCandidate.client.interests.filter((i) =>
       client.interests.includes(i)
@@ -307,24 +355,32 @@ class RealtimeMatchmakingCoordinator {
     });
   }
 
-  public leaveAll(userId: string, reason: 'skip' | 'end' | 'disconnect'): void {
-    this.waitingQueue.delete(userId);
+  public leaveConnection(connectionId: string, reason: 'skip' | 'end' | 'disconnect'): void {
+    this.waitingQueue.delete(connectionId);
 
-    const sessionId = this.userToSessionId.get(userId);
+    const sessionId = this.clientToSessionId.get(connectionId);
     if (!sessionId) return;
 
     const session = this.activeSessions.get(sessionId);
     this.activeSessions.delete(sessionId);
-    this.userToSessionId.delete(userId);
+    this.clientToSessionId.delete(connectionId);
 
     if (session) {
-      const partner = session.userA.userId === userId ? session.userB : session.userA;
-      this.userToSessionId.delete(partner.userId);
+      const partner = session.userA.id === connectionId ? session.userB : session.userA;
+      this.clientToSessionId.delete(partner.id);
       partner.send({
         type: 'stranger:disconnected',
         sessionId: session.sessionId,
         reason,
       });
+    }
+  }
+
+  public leaveAll(userId: string, reason: 'skip' | 'end' | 'disconnect'): void {
+    for (const [connId, client] of this.clientsById.entries()) {
+      if (client.userId === userId) {
+        this.leaveConnection(connId, reason);
+      }
     }
   }
 
@@ -377,10 +433,11 @@ class RealtimeMatchmakingCoordinator {
         buffer = buffer.subarray(totalFrameLength);
 
         if (opcode === 0x08) {
-          // Close frame
-          this.leaveAll(client.userId, 'disconnect');
-          if (this.clientsByUser.get(client.userId)?.id === client.id) {
-            this.clientsByUser.delete(client.userId);
+          this.leaveConnection(client.id, 'disconnect');
+          this.clientsById.delete(client.id);
+          const tabKey = `${client.userId}:${client.clientId}`;
+          if (this.tabKeyToClientId.get(tabKey) === client.id) {
+            this.tabKeyToClientId.delete(tabKey);
           }
           client.close();
           return;
@@ -405,9 +462,11 @@ class RealtimeMatchmakingCoordinator {
     });
 
     const handleDisconnect = () => {
-      this.leaveAll(client.userId, 'disconnect');
-      if (this.clientsByUser.get(client.userId)?.id === client.id) {
-        this.clientsByUser.delete(client.userId);
+      this.leaveConnection(client.id, 'disconnect');
+      this.clientsById.delete(client.id);
+      const tabKey = `${client.userId}:${client.clientId}`;
+      if (this.tabKeyToClientId.get(tabKey) === client.id) {
+        this.tabKeyToClientId.delete(tabKey);
       }
     };
 

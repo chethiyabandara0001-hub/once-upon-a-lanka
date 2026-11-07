@@ -544,21 +544,6 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
           </nav>
 
           <div className="flex items-center gap-3 shrink-0">
-            <div className="hidden sm:flex items-center bg-white/10 border border-white/15 rounded-full p-0.5 text-[11px] font-bold">
-              {(['en', 'si', 'ta'] as LanguageCode[]).map((code) => (
-                <button
-                  key={code}
-                  type="button"
-                  onClick={() => onLanguageChange(code)}
-                  className={`px-2.5 py-0.5 rounded-full ${
-                    language === code ? 'bg-[#c5fa5a] text-[#14201b]' : 'text-white/80'
-                  }`}
-                >
-                  {code === 'en' ? 'EN' : code === 'si' ? 'සිං' : 'தமிழ்'}
-                </button>
-              ))}
-            </div>
-
             <button
               type="button"
               onClick={onLogout}
