@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-hero: #101417;
+    --bg-canvas: #f5f6f2;
+    --bg-sage: #e9eee5;
+    --bg-forest: #17221c;
+    --ink: #14201b;
+    --lime: #c5fa5a;
+    --lime-soft: #dff4b3;
+    --muted: #6d7a72;
+  }
+
+  html {
+    background-color: #f5f6f2;
+    color: #14201b;
+    font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    scroll-behavior: smooth;
+  }
+
+  h1, h2, h3, .font-outfit {
+    font-family: 'Outfit', sans-serif;
+    letter-spacing: -0.045em;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+.font-serif-editorial {
+  font-family: 'Outfit', sans-serif;
+  letter-spacing: -0.05em;
+}
+
+.font-sans-ui {
+  font-family: 'DM Sans', sans-serif;
+}
+
+.font-mono-tabular {
+  font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.text-balance {
+  text-wrap: balance;
+}
+
+.brand-leaf {
+  width: 32px;
+  height: 32px;
+  border-radius: 12px 12px 12px 3px;
+  background: #c5fa5a;
+  transform: rotate(-8deg);
+  display: inline-grid;
+  place-items: center;
+  color: #182018;
+  font-size: 19px;
+  font-weight: 900;
+  flex-shrink: 0;
+}

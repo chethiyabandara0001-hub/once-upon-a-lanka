@@ -1,0 +1,40 @@
+# ============================================================================
+# ONCE UPON A TIME (OUAT) — CLOUDFLARE DEPLOYMENT CONFIGURATION
+# Target: Cloudflare Workers + D1 + Durable Objects + R2
+# ============================================================================
+
+name = "once-upon-a-time-lk"
+main = "cloudflare/worker.ts"
+compatibility_date = "2026-03-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+APP_ENV = "production"
+MARKET_COUNTRY = "LK"
+CURRENCY = "LKR"
+MEMBERSHIP_PRICE_LKR = "500"
+MEMBERSHIP_DURATION_DAYS = "30"
+PAYHERE_SANDBOX = "true"
+STUN_SERVERS = "stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302"
+
+# 1. Cloudflare D1 Database Binding
+[[d1_databases]]
+binding = "DB"
+database_name = "ouat-production-d1"
+database_id = "00000000-0000-0000-0000-000000000000" # Replace with `wrangler d1 create ouat-production-d1`
+migrations_dir = "cloudflare/migrations"
+
+# 2. Cloudflare Durable Objects Binding (Atomic WebRTC & Text Matchmaking)
+[durable_objects]
+bindings = [
+  { name = "MATCHMAKER_DO", class_name = "MatchmakerDurableObject" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MatchmakerDurableObject"]
+
+# 3. Cloudflare R2 Object Storage Binding (Profile Avatars)
+[[r2_buckets]]
+binding = "AVATAR_BUCKET"
+bucket_name = "ouat-profile-avatars"

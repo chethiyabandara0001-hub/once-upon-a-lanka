@@ -1,0 +1,487 @@
+{
+  "users": [
+    {
+      "id": "usr_admin_lk",
+      "email": "admin@onceuponatime.lk",
+      "password_hash": "9c11fe149ad22c48fce3a36e019438312dc6038f8dae1caee376404d43097b7e237e97b66bb84d66b0a46496053c69dcf73831481bee6b8b957ebb7cbd4c07bb",
+      "password_salt": "8a0e89e5b1599b046d1e8cb7a9754e83",
+      "display_name": "Nalin Wijesinghe (Trust & Safety)",
+      "date_of_birth": "1991-04-14",
+      "age_verified_at": "2026-11-06T15:37:40.699Z",
+      "email_verified": true,
+      "email_verification_token": null,
+      "password_reset_token": null,
+      "password_reset_expires_at": null,
+      "role": "admin",
+      "account_status": "active",
+      "onboarding_completed": true,
+      "preferred_language": "en",
+      "terms_accepted_at": "2026-11-06T15:37:40.699Z",
+      "created_at": "2026-11-06T15:37:40.699Z",
+      "updated_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "id": "usr_amaya",
+      "email": "amaya@onceuponatime.lk",
+      "password_hash": "7d1efe613756a4282d4cb6ddf7f78c9e67f1aed41bbd3f3330b6982a1c3315d57151cc6ee34a8dc1a570be4a78403f81c6901bd0d9abd0b0bd0b5de718b304ac",
+      "password_salt": "060fa9ef0a9eb90019d3eda39b7ca6ec",
+      "display_name": "Amaya Senanayake",
+      "date_of_birth": "1999-08-19",
+      "age_verified_at": "2026-11-06T15:37:40.699Z",
+      "email_verified": true,
+      "email_verification_token": null,
+      "password_reset_token": null,
+      "password_reset_expires_at": null,
+      "role": "member",
+      "account_status": "active",
+      "onboarding_completed": true,
+      "preferred_language": "en",
+      "terms_accepted_at": "2026-11-06T15:37:40.699Z",
+      "created_at": "2026-11-06T15:37:40.699Z",
+      "updated_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "id": "usr_kavan",
+      "email": "kavan@onceuponatime.lk",
+      "password_hash": "7d1efe613756a4282d4cb6ddf7f78c9e67f1aed41bbd3f3330b6982a1c3315d57151cc6ee34a8dc1a570be4a78403f81c6901bd0d9abd0b0bd0b5de718b304ac",
+      "password_salt": "060fa9ef0a9eb90019d3eda39b7ca6ec",
+      "display_name": "Kavan Perera",
+      "date_of_birth": "1997-11-03",
+      "age_verified_at": "2026-11-06T15:37:40.699Z",
+      "email_verified": true,
+      "email_verification_token": null,
+      "password_reset_token": null,
+      "password_reset_expires_at": null,
+      "role": "member",
+      "account_status": "active",
+      "onboarding_completed": true,
+      "preferred_language": "en",
+      "terms_accepted_at": "2026-11-06T15:37:40.699Z",
+      "created_at": "2026-11-06T15:37:40.699Z",
+      "updated_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "id": "usr_dilini",
+      "email": "dilini@onceuponatime.lk",
+      "password_hash": "7d1efe613756a4282d4cb6ddf7f78c9e67f1aed41bbd3f3330b6982a1c3315d57151cc6ee34a8dc1a570be4a78403f81c6901bd0d9abd0b0bd0b5de718b304ac",
+      "password_salt": "060fa9ef0a9eb90019d3eda39b7ca6ec",
+      "display_name": "Dilini Ratnayake",
+      "date_of_birth": "2000-02-24",
+      "age_verified_at": "2026-11-06T15:37:40.699Z",
+      "email_verified": true,
+      "email_verification_token": null,
+      "password_reset_token": null,
+      "password_reset_expires_at": null,
+      "role": "member",
+      "account_status": "active",
+      "onboarding_completed": true,
+      "preferred_language": "si",
+      "terms_accepted_at": "2026-11-06T15:37:40.699Z",
+      "created_at": "2026-11-06T15:37:40.699Z",
+      "updated_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "id": "usr_ehan",
+      "email": "ehan@onceuponatime.lk",
+      "password_hash": "7d1efe613756a4282d4cb6ddf7f78c9e67f1aed41bbd3f3330b6982a1c3315d57151cc6ee34a8dc1a570be4a78403f81c6901bd0d9abd0b0bd0b5de718b304ac",
+      "password_salt": "060fa9ef0a9eb90019d3eda39b7ca6ec",
+      "display_name": "Ehan Selvarajah",
+      "date_of_birth": "1996-06-12",
+      "age_verified_at": "2026-11-06T15:37:40.699Z",
+      "email_verified": true,
+      "email_verification_token": null,
+      "password_reset_token": null,
+      "password_reset_expires_at": null,
+      "role": "member",
+      "account_status": "active",
+      "onboarding_completed": true,
+      "preferred_language": "ta",
+      "terms_accepted_at": "2026-11-06T15:37:40.699Z",
+      "created_at": "2026-11-06T15:37:40.699Z",
+      "updated_at": "2026-11-06T15:37:40.699Z"
+    }
+  ],
+  "profiles": [
+    {
+      "user_id": "usr_admin_lk",
+      "avatar_url": "/src/assets/images/editorial_portrait_kavan_1793978350314.jpg",
+      "bio": "Platform steward ensuring Once Upon a Time remains thoughtful, respectful, and safe for adults across Sri Lanka.",
+      "region": "Colombo",
+      "show_region": true,
+      "dating_intention": "new_conversations",
+      "spoken_languages": [
+        "English",
+        "Sinhala",
+        "Tamil"
+      ],
+      "discoverable": false,
+      "allow_random_video": true,
+      "allow_random_text": true,
+      "updated_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_amaya",
+      "avatar_url": "/src/assets/images/editorial_portrait_amaya_1793978349458.jpg",
+      "bio": "Textile curator splitting weeks between Colombo and Galle Fort. Looking for someone who appreciates unhurried evening tea, old cinema, and honest conversation.",
+      "region": "Galle & Colombo",
+      "show_region": true,
+      "dating_intention": "long_term_story",
+      "spoken_languages": [
+        "English",
+        "Sinhala"
+      ],
+      "discoverable": true,
+      "allow_random_video": true,
+      "allow_random_text": true,
+      "updated_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_kavan",
+      "avatar_url": "/src/assets/images/editorial_portrait_kavan_1793978350314.jpg",
+      "bio": "Spatial architect inspired by Geoffrey Bawa courtyards and monsoon afternoons. Always up for acoustic jazz nights or driving down the southern coast.",
+      "region": "Colombo 07",
+      "show_region": true,
+      "dating_intention": "meaningful_dating",
+      "spoken_languages": [
+        "English",
+        "Sinhala"
+      ],
+      "discoverable": true,
+      "allow_random_video": true,
+      "allow_random_text": true,
+      "updated_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_dilini",
+      "avatar_url": "/src/assets/images/editorial_portrait_dilini_1793978350862.jpg",
+      "bio": "Literature postgraduate and classical pianist based in Kandy. Drawn to people who still read physical books and notice small details.",
+      "region": "Kandy",
+      "show_region": true,
+      "dating_intention": "long_term_story",
+      "spoken_languages": [
+        "Sinhala",
+        "English"
+      ],
+      "discoverable": true,
+      "allow_random_video": true,
+      "allow_random_text": true,
+      "updated_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_ehan",
+      "avatar_url": "/src/assets/images/editorial_portrait_ehan_1793978352895.jpg",
+      "bio": "Documentary cinematographer working between Colombo and the southern coast. Best conversations happen over black coffee at blue hour.",
+      "region": "Mirissa & Colombo",
+      "show_region": true,
+      "dating_intention": "meaningful_dating",
+      "spoken_languages": [
+        "Tamil",
+        "English",
+        "Sinhala"
+      ],
+      "discoverable": true,
+      "allow_random_video": true,
+      "allow_random_text": true,
+      "updated_at": "2026-11-06T15:37:40.699Z"
+    }
+  ],
+  "user_sessions": [],
+  "interests": [
+    {
+      "id": "int_tea",
+      "slug": "ceylon-tea-cafes",
+      "label_en": "Ceylon Tea & Cafés",
+      "label_si": "තේ සහ කැෆේ",
+      "label_ta": "தேநீர் & கபேக்கள்",
+      "category": "Culture & Food"
+    },
+    {
+      "id": "int_cinema",
+      "slug": "world-cinema",
+      "label_en": "Independent Cinema",
+      "label_si": "සිනමාව",
+      "label_ta": "சினிமா",
+      "category": "Arts"
+    },
+    {
+      "id": "int_architecture",
+      "slug": "tropical-architecture",
+      "label_en": "Tropical Architecture",
+      "label_si": "ගෘහ නිර්මාණ ශිල්පය",
+      "label_ta": "கட்டிடக்கலை",
+      "category": "Design"
+    },
+    {
+      "id": "int_coastal",
+      "slug": "southern-coast",
+      "label_en": "Southern Coast Escapes",
+      "label_si": "දකුණු වෙරළ තීරය",
+      "label_ta": "தெற்கு கடற்கரை",
+      "category": "Travel"
+    },
+    {
+      "id": "int_literature",
+      "slug": "literature-poetry",
+      "label_en": "Literature & Poetry",
+      "label_si": "සාහිත්‍යය සහ කවි",
+      "label_ta": "இலக்கியம் & கவிதை",
+      "category": "Arts"
+    },
+    {
+      "id": "int_music",
+      "slug": "live-acoustic-jazz",
+      "label_en": "Live Acoustic & Jazz",
+      "label_si": "සංගීතය",
+      "label_ta": "இசை",
+      "category": "Music"
+    },
+    {
+      "id": "int_photography",
+      "slug": "film-photography",
+      "label_en": "35mm Film Photography",
+      "label_si": "ඡායාරූපකරණය",
+      "label_ta": "புகைப்படக்கலை",
+      "category": "Arts"
+    },
+    {
+      "id": "int_hillcountry",
+      "slug": "hill-country-trails",
+      "label_en": "Hill Country Trails",
+      "label_si": "කඳුකර සංචාර",
+      "label_ta": "மலையகப் பயணம்",
+      "category": "Outdoors"
+    },
+    {
+      "id": "int_culinary",
+      "slug": "contemporary-sri-lankan-cuisine",
+      "label_en": "Island Gastronomy",
+      "label_si": "ආහාර සංස්කෘතිය",
+      "label_ta": "உணவு கலாச்சாரம்",
+      "category": "Culture & Food"
+    },
+    {
+      "id": "int_philosophy",
+      "slug": "late-night-conversations",
+      "label_en": "Late-Night Conversations",
+      "label_si": "ගැඹුරු සංවාද",
+      "label_ta": "ஆழமான உரையாடல்கள்",
+      "category": "Lifestyle"
+    },
+    {
+      "id": "int_art",
+      "slug": "colombo-galleries",
+      "label_en": "Galleries & Contemporary Art",
+      "label_si": "චිත්‍ර කලාව",
+      "label_ta": "நவீன கலை",
+      "category": "Arts"
+    },
+    {
+      "id": "int_cricket",
+      "slug": "island-cricket-evenings",
+      "label_en": "Test Cricket & Evenings",
+      "label_si": "ක්‍රිකට්",
+      "label_ta": "கிரிக்கெட்",
+      "category": "Sports"
+    }
+  ],
+  "user_interests": [
+    {
+      "user_id": "usr_amaya",
+      "interest_id": "int_tea",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_amaya",
+      "interest_id": "int_art",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_amaya",
+      "interest_id": "int_cinema",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_amaya",
+      "interest_id": "int_coastal",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_kavan",
+      "interest_id": "int_architecture",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_kavan",
+      "interest_id": "int_music",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_kavan",
+      "interest_id": "int_coastal",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_kavan",
+      "interest_id": "int_photography",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_dilini",
+      "interest_id": "int_literature",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_dilini",
+      "interest_id": "int_tea",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_dilini",
+      "interest_id": "int_hillcountry",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_dilini",
+      "interest_id": "int_philosophy",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_ehan",
+      "interest_id": "int_cinema",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_ehan",
+      "interest_id": "int_photography",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_ehan",
+      "interest_id": "int_coastal",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "user_id": "usr_ehan",
+      "interest_id": "int_culinary",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    }
+  ],
+  "likes": [
+    {
+      "id": "like_seed_1",
+      "actor_id": "usr_amaya",
+      "target_id": "usr_kavan",
+      "action": "like",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "id": "like_seed_2",
+      "actor_id": "usr_kavan",
+      "target_id": "usr_amaya",
+      "action": "like",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    }
+  ],
+  "dating_matches": [
+    {
+      "id": "mtc_amaya_kavan",
+      "user_a_id": "usr_amaya",
+      "user_b_id": "usr_kavan",
+      "status": "active",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    }
+  ],
+  "conversations": [
+    {
+      "id": "cnv_amaya_kavan",
+      "match_id": "mtc_amaya_kavan",
+      "last_message_at": "2026-11-06T15:37:40.699Z",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    }
+  ],
+  "messages": [
+    {
+      "id": "msg_seed_1",
+      "conversation_id": "cnv_amaya_kavan",
+      "sender_id": "usr_kavan",
+      "body": "Saw that you spend half your week in Galle Fort—have you visited the new textile archive near Church Street?",
+      "read_at": "2026-11-06T15:37:40.699Z",
+      "created_at": "2026-11-06T14:37:40.826Z"
+    },
+    {
+      "id": "msg_seed_2",
+      "conversation_id": "cnv_amaya_kavan",
+      "sender_id": "usr_amaya",
+      "body": "Yes! I helped catalogue two of the handloom pieces last month. We should meet for evening tea at Pedlar Street next time you are down south.",
+      "read_at": null,
+      "created_at": "2026-11-06T15:37:40.699Z"
+    }
+  ],
+  "memberships": [
+    {
+      "id": "mem_admin",
+      "user_id": "usr_admin_lk",
+      "plan_name": "Once Upon a Time Membership",
+      "price_lkr": 500,
+      "status": "active",
+      "starts_at": "2026-11-06T15:37:40.699Z",
+      "expires_at": "2026-12-06T15:37:40.699Z",
+      "last_payment_id": "pay_seed_admin",
+      "updated_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "id": "mem_amaya",
+      "user_id": "usr_amaya",
+      "plan_name": "Once Upon a Time Membership",
+      "price_lkr": 500,
+      "status": "active",
+      "starts_at": "2026-11-06T15:37:40.699Z",
+      "expires_at": "2026-12-06T15:37:40.699Z",
+      "last_payment_id": "pay_seed_amaya",
+      "updated_at": "2026-11-06T15:37:40.699Z"
+    },
+    {
+      "id": "mem_kavan",
+      "user_id": "usr_kavan",
+      "plan_name": "Once Upon a Time Membership",
+      "price_lkr": 500,
+      "status": "active",
+      "starts_at": "2026-11-06T15:37:40.699Z",
+      "expires_at": "2026-12-06T15:37:40.699Z",
+      "last_payment_id": "pay_seed_kavan",
+      "updated_at": "2026-11-06T15:37:40.699Z"
+    }
+  ],
+  "payments": [
+    {
+      "id": "pay_seed_amaya",
+      "order_id": "OUAT-LK-2026-0001",
+      "user_id": "usr_amaya",
+      "amount_lkr": 500,
+      "currency": "LKR",
+      "gateway": "payhere_sandbox",
+      "gateway_payment_id": "PH-SBX-884120",
+      "status": "completed",
+      "idempotency_key": "idem_seed_amaya_0001",
+      "signature_verified": true,
+      "raw_notification_summary": "Verified PayHere Sandbox LKR 500.00 status_code=2",
+      "created_at": "2026-11-06T15:37:40.699Z",
+      "verified_at": "2026-11-06T15:37:40.699Z"
+    }
+  ],
+  "reports": [],
+  "blocks": [],
+  "moderation_actions": [],
+  "audit_logs": [
+    {
+      "id": "aud_init_1",
+      "actor_user_id": "usr_admin_lk",
+      "event_type": "database.initialized",
+      "entity_type": "system",
+      "entity_id": "0001_initial_schema",
+      "metadata_json": "{\"tables\":15,\"market\":\"LK\",\"currency\":\"LKR\"}",
+      "ip_address": "127.0.0.1",
+      "created_at": "2026-11-06T15:37:40.699Z"
+    }
+  ]
+}

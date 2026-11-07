@@ -1,0 +1,11 @@
+{
+  "name": "Once Upon a Time",
+  "description": "Every connection has a story. An adults-only dating, interest-based discovery, and live video-chat platform crafted for Sri Lanka.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
