@@ -30,6 +30,10 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidBlockId(id) {
+      return id is string && id.size() >= 3 && id.size() <= 260 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
     function isValidNicId(nicId) {
       return nicId is string && nicId.size() >= 10 && nicId.size() <= 12 && nicId.matches('^([0-9]{9}[VX]|[0-9]{12})$');
     }
@@ -38,7 +42,7 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    // 3. Entity Validation Blueprints (Pillar 2 & Pillar 5)
+    // 3. Entity Validation Blueprints
     function isValidUserPublicProfile(data, userId) {
       return data.keys().hasAll([
           'userId',
@@ -153,7 +157,56 @@ service cloud.firestore {
         data.createdAt is timestamp;
     }
 
-    // 4. Collection Rules: /users/{userId} (Non-PII Public Profile)
+    function isValidQueueEntry(data, userId) {
+      return data.keys().hasAll(['userId', 'displayName', 'status', 'createdAt', 'updatedAt']) &&
+        data.userId is string && data.userId == userId &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50 &&
+        data.status in ['waiting', 'matched', 'cancelled'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSession(data, sessionId) {
+      return data.keys().hasAll(['sessionId', 'participants', 'userAId', 'userBId', 'status', 'createdAt', 'updatedAt']) &&
+        data.sessionId is string && data.sessionId == sessionId &&
+        data.participants is list && data.participants.size() == 2 &&
+        data.userAId is string && data.userAId.size() <= 128 &&
+        data.userBId is string && data.userBId.size() <= 128 &&
+        data.userAId != data.userBId &&
+        data.status in ['active', 'ended'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSessionMessage(data) {
+      return data.keys().hasAll(['id', 'sessionId', 'senderId', 'senderName', 'text', 'createdAt']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.sessionId is string && data.sessionId.size() <= 128 &&
+        data.senderId is string && data.senderId == request.auth.uid &&
+        data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 50 &&
+        data.text is string && data.text.size() >= 1 && data.text.size() <= 1000 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidBlock(data, blockId) {
+      return data.keys().hasAll(['id', 'blockerId', 'blockedUserId', 'createdAt']) &&
+        data.id is string && data.id == blockId &&
+        data.blockerId is string && data.blockerId == request.auth.uid &&
+        data.blockedUserId is string && data.blockedUserId.size() <= 128 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidReport(data, reportId) {
+      return data.keys().hasAll(['id', 'reporterId', 'reportedUserId', 'contextType', 'reason', 'status', 'createdAt']) &&
+        data.id is string && data.id == reportId &&
+        data.reporterId is string && data.reporterId == request.auth.uid &&
+        data.reportedUserId is string && data.reportedUserId.size() <= 128 &&
+        data.contextType in ['random_video', 'random_text', 'profile', 'direct_message'] &&
+        data.status in ['open', 'investigating', 'resolved', 'dismissed'] &&
+        data.createdAt is timestamp;
+    }
+
+    // 4. Collection Rules: /users/{userId}
     match /users/{userId} {
       allow get: if isSignedIn() && isValidId(userId) && (
         isOwner(userId) || (resource != null && existing().discoverable == true)
@@ -197,7 +250,7 @@ service cloud.firestore {
 
       allow delete: if false;
 
-      // 5. Subcollection Rules: /users/{userId}/private/{docId} (Strictly Isolated PII)
+      // 5. Subcollection Rules: /users/{userId}/private/{docId}
       match /private/{docId} {
         allow get: if isSignedIn() &&
           isValidId(userId) &&
@@ -247,14 +300,12 @@ service cloud.firestore {
       }
     }
 
-    // 6. Collection Rules: /nic_registry/{nicId} (One Sri Lankan NIC Per Account Lock)
+    // 6. Collection Rules: /nic_registry/{nicId}
     match /nic_registry/{nicId} {
-      // Allow authenticated user to check if a NIC is already registered before/during sign-up
       allow get: if isSignedIn() && isValidNicId(nicId);
 
       allow list: if false;
 
-      // Only allow creating a NIC lock if it does not already exist AND the user atomically creates their private account with that exact NIC
       allow create: if isVerifiedUser() &&
         isValidNicId(nicId) &&
         isValidNicRegistryEntry(incoming(), nicId) &&
@@ -263,6 +314,124 @@ service cloud.firestore {
         getAfter(/databases/$(database)/documents/users/$(request.auth.uid)/private/account).data.nicNumber == nicId;
 
       allow update, delete: if false;
+    }
+
+    // 7. Collection Rules: /matchmaking_queue/{userId}
+    match /matchmaking_queue/{userId} {
+      allow get: if isSignedIn() && isValidId(userId);
+
+      allow list: if isSignedIn();
+
+      allow create: if isSignedIn() &&
+        isValidId(userId) &&
+        isOwner(userId) &&
+        isValidQueueEntry(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn() &&
+        isValidId(userId) &&
+        isValidQueueEntry(incoming(), userId) &&
+        incoming().updatedAt == request.time && (
+          isOwner(userId) || (
+            existing().status == 'waiting' &&
+            incoming().status == 'matched' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'sessionId', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isSignedIn() && isValidId(userId) && isOwner(userId);
+    }
+
+    // 8. Collection Rules: /matchmaking_sessions/{sessionId}
+    match /matchmaking_sessions/{sessionId} {
+      allow get: if isSignedIn() && isValidId(sessionId) && (
+        existing().userAId == request.auth.uid ||
+        existing().userBId == request.auth.uid
+      );
+
+      allow list: if isSignedIn() && (
+        resource.data.userAId == request.auth.uid ||
+        resource.data.userBId == request.auth.uid
+      );
+
+      allow create: if isSignedIn() &&
+        isValidId(sessionId) &&
+        isValidSession(incoming(), sessionId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          incoming().userAId == request.auth.uid ||
+          incoming().userBId == request.auth.uid
+        );
+
+      allow update: if isSignedIn() &&
+        isValidId(sessionId) &&
+        incoming().updatedAt == request.time && (
+          existing().userAId == request.auth.uid ||
+          existing().userBId == request.auth.uid
+        ) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+
+      allow delete: if false;
+
+      // Ephemeral Session Messages Subcollection
+      match /messages/{messageId} {
+        allow get, list: if isSignedIn() && isValidId(sessionId) && (
+          get(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)).data.userAId == request.auth.uid ||
+          get(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)).data.userBId == request.auth.uid
+        );
+
+        allow create: if isSignedIn() &&
+          isValidId(sessionId) &&
+          isValidSessionMessage(incoming()) &&
+          incoming().sessionId == sessionId &&
+          incoming().senderId == request.auth.uid &&
+          incoming().createdAt == request.time && (
+            get(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)).data.userAId == request.auth.uid ||
+            get(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)).data.userBId == request.auth.uid
+          );
+
+        allow update, delete: if false;
+      }
+    }
+
+    // 9. Collection Rules: /blocks/{blockId}
+    match /blocks/{blockId} {
+      allow get: if isSignedIn() && isValidBlockId(blockId) && existing().blockerId == request.auth.uid;
+
+      allow list: if isSignedIn() && resource.data.blockerId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+        isValidBlockId(blockId) &&
+        isValidBlock(incoming(), blockId) &&
+        incoming().blockerId == request.auth.uid &&
+        incoming().createdAt == request.time;
+
+      allow delete: if isSignedIn() && isValidBlockId(blockId) && existing().blockerId == request.auth.uid;
+
+      allow update: if false;
+    }
+
+    // 10. Collection Rules: /reports/{reportId}
+    match /reports/{reportId} {
+      allow get: if isSignedIn() && isValidId(reportId) && existing().reporterId == request.auth.uid;
+
+      allow list: if false;
+
+      allow create: if isSignedIn() &&
+        isValidId(reportId) &&
+        isValidReport(incoming(), reportId) &&
+        incoming().reporterId == request.auth.uid &&
+        incoming().createdAt == request.time;
+
+      allow update, delete: if false;
+    }
+
+    // 11. Collection Rules: /subscriptions/{userId}
+    match /subscriptions/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && isOwner(userId);
+
+      allow list, create, update, delete: if false;
     }
   }
 }

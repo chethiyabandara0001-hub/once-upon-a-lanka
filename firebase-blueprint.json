@@ -2,7 +2,7 @@
   "entities": {
     "UserPrivateAccount": {
       "title": "UserPrivateAccount",
-      "description": "Isolated PII document storing a user's full name, email, date of birth, gender, and unique Sri Lankan NIC number.",
+      "description": "Isolated PII document storing a user's full name, email, dateOfBirth, gender, and unique Sri Lankan NIC number.",
       "type": "object",
       "properties": {
         "userId": {
@@ -221,6 +221,308 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "MatchmakingQueueEntry": {
+      "title": "MatchmakingQueueEntry",
+      "description": "Active real user waiting in the spontaneous matchmaking queue.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "User ID of the waiting participant."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 50,
+          "description": "Display name of waiting user."
+        },
+        "region": {
+          "type": "string",
+          "maxLength": 60,
+          "description": "User region."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "matched", "cancelled"],
+          "description": "Current status in the matchmaking queue."
+        },
+        "sessionId": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "ID of paired matchmaking session once matched."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when user joined queue."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of last queue update or heartbeat."
+        }
+      },
+      "required": ["userId", "displayName", "status", "createdAt", "updatedAt"]
+    },
+    "MatchmakingSession": {
+      "title": "MatchmakingSession",
+      "description": "A live random text session between two real authenticated users.",
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Unique session ID."
+        },
+        "participants": {
+          "type": "array",
+          "description": "List of user IDs in this session."
+        },
+        "userAId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "User ID of first participant."
+        },
+        "userBId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "User ID of second participant."
+        },
+        "userAName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50,
+          "description": "Display name of first participant."
+        },
+        "userBName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50,
+          "description": "Display name of second participant."
+        },
+        "userARegion": {
+          "type": "string",
+          "maxLength": 60,
+          "description": "Region of first participant."
+        },
+        "userBRegion": {
+          "type": "string",
+          "maxLength": 60,
+          "description": "Region of second participant."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "ended"],
+          "description": "Session active state."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when session began."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of last state change."
+        }
+      },
+      "required": ["sessionId", "participants", "userAId", "userBId", "status", "createdAt", "updatedAt"]
+    },
+    "SessionMessage": {
+      "title": "SessionMessage",
+      "description": "Ephemeral message sent inside a matchmaking session.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Message document ID."
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Parent session ID."
+        },
+        "senderId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Sender user ID."
+        },
+        "senderName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50,
+          "description": "Sender display name."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "description": "Message text content."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of message creation."
+        }
+      },
+      "required": ["id", "sessionId", "senderId", "senderName", "text", "createdAt"]
+    },
+    "UserBlock": {
+      "title": "UserBlock",
+      "description": "User block record preventing matching and direct contact.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 260,
+          "description": "Document ID matching blockerId_blockedUserId."
+        },
+        "blockerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "User ID who initiated the block."
+        },
+        "blockedUserId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "User ID who is blocked."
+        },
+        "blockedDisplayName": {
+          "type": "string",
+          "maxLength": 50,
+          "description": "Display name of blocked user."
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Optional reason for block."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when block was created."
+        }
+      },
+      "required": ["id", "blockerId", "blockedUserId", "createdAt"]
+    },
+    "UserReport": {
+      "title": "UserReport",
+      "description": "Safety report submitted by a user for moderation.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Report ID."
+        },
+        "reporterId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "User ID of reporter."
+        },
+        "reportedUserId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "User ID being reported."
+        },
+        "contextType": {
+          "type": "string",
+          "enum": ["random_video", "random_text", "profile", "direct_message"],
+          "description": "Context of report."
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 50,
+          "description": "Report category code."
+        },
+        "details": {
+          "type": "string",
+          "maxLength": 1000,
+          "description": "Report explanation."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["open", "investigating", "resolved", "dismissed"],
+          "description": "Moderation status."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of submission."
+        }
+      },
+      "required": ["id", "reporterId", "reportedUserId", "contextType", "reason", "status", "createdAt"]
+    },
+    "SubscriptionRecord": {
+      "title": "SubscriptionRecord",
+      "description": "Standard 30-day membership record for adult members.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Subscriber User ID."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "inactive", "expired"],
+          "description": "Subscription status."
+        },
+        "plan": {
+          "type": "string",
+          "enum": ["standard_30d", "free_trial"],
+          "description": "Plan tier identifier."
+        },
+        "amount": {
+          "type": "number",
+          "description": "Amount in LKR (e.g. 500)."
+        },
+        "currency": {
+          "type": "string",
+          "enum": ["LKR"],
+          "description": "Currency code."
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Expiry timestamp."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp."
+        }
+      },
+      "required": ["userId", "status", "plan", "amount", "currency", "expiresAt", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -235,6 +537,30 @@
     "/nic_registry/{nicId}": {
       "schema": { "$ref": "#/entities/NicRegistryEntry" },
       "description": "Immutable Sri Lankan NIC uniqueness registry preventing duplicate NIC sign-ups across accounts."
+    },
+    "/matchmaking_queue/{userId}": {
+      "schema": { "$ref": "#/entities/MatchmakingQueueEntry" },
+      "description": "Live matchmaking queue containing real authenticated users waiting for spontaneous text chat."
+    },
+    "/matchmaking_sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/MatchmakingSession" },
+      "description": "Active paired random chat sessions between two authenticated participants."
+    },
+    "/matchmaking_sessions/{sessionId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/SessionMessage" },
+      "description": "Ephemeral real-time chat messages exchanged between participants during a matchmaking session."
+    },
+    "/blocks/{blockId}": {
+      "schema": { "$ref": "#/entities/UserBlock" },
+      "description": "Safety block records preventing pairing and messaging between users."
+    },
+    "/reports/{reportId}": {
+      "schema": { "$ref": "#/entities/UserReport" },
+      "description": "User-submitted safety reports for Trust & Safety moderation."
+    },
+    "/subscriptions/{userId}": {
+      "schema": { "$ref": "#/entities/SubscriptionRecord" },
+      "description": "Membership subscription records."
     }
   }
 }

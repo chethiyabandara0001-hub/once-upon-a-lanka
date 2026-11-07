@@ -16,6 +16,8 @@ import {
   serverTimestamp,
   where,
   writeBatch,
+  setDoc,
+  deleteDoc,
 } from 'firebase/firestore';
 import {
   auth,
@@ -972,64 +974,82 @@ export async function apiRequest<T>(
     }
   }
 
-  // 6. Safety Blocks & Reports
+  // 6. Safety Blocks & Reports backed by Cloud Firestore
   if (path === '/safety/blocks' && method === 'GET') {
     const uid = auth.currentUser?.uid || '';
-    const interactions = loadInteractions();
-    return {
-      blocks: interactions.blocks.filter((b) => b.blockerId === uid),
-    } as unknown as T;
+    if (!uid) return { blocks: [] } as unknown as T;
+    try {
+      const q = query(collection(db, 'blocks'), where('blockerId', '==', uid));
+      const snap = await getDocs(q);
+      const list: Array<{ id: string; blockerId: string; blockedUserId: string; blockedDisplayName: string; createdAt: string }> = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        list.push({
+          id: d.id,
+          blockerId: String(data.blockerId || uid),
+          blockedUserId: String(data.blockedUserId || ''),
+          blockedDisplayName: String(data.blockedDisplayName || 'Member'),
+          createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : new Date().toISOString(),
+        });
+      });
+      return { blocks: list } as unknown as T;
+    } catch {
+      return { blocks: [] } as unknown as T;
+    }
   }
 
   if (path === '/safety/block' && method === 'POST') {
     const uid = auth.currentUser?.uid || '';
-    const targetUserId = String(body.targetUserId || 'usr_stranger');
-    const interactions = loadInteractions();
-    const seeded = SEEDED_DISCOVER_PROFILES.find((p) => p.userId === targetUserId);
-    interactions.blocks.push({
-      id: `blk_${Date.now().toString(36)}`,
-      blockerId: uid,
-      blockedUserId: targetUserId,
-      blockedDisplayName: seeded?.displayName || 'Member',
-      reason: String(body.reason || 'Blocked by user'),
-      createdAt: new Date().toISOString(),
-    });
-    saveInteractions(interactions);
-    return { blocked: true, targetUserId } as unknown as T;
+    const targetUserId = String(body.targetUserId || '');
+    if (!uid || !targetUserId) throw new Error('Missing block parameters');
+    const blockDocId = `${uid}_${targetUserId}`;
+    try {
+      await setDoc(doc(db, 'blocks', blockDocId), {
+        id: blockDocId,
+        blockerId: uid,
+        blockedUserId: targetUserId,
+        blockedDisplayName: String(body.blockedDisplayName || 'Member'),
+        reason: String(body.reason || 'Blocked by user'),
+        createdAt: serverTimestamp(),
+      });
+      return { blocked: true, targetUserId } as unknown as T;
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `blocks/${blockDocId}`);
+    }
   }
 
   const unblockMatch = path.match(/^\/safety\/blocks\/([^/]+)$/);
   if (unblockMatch && method === 'DELETE') {
     const uid = auth.currentUser?.uid || '';
     const targetId = unblockMatch[1];
-    const interactions = loadInteractions();
-    interactions.blocks = interactions.blocks.filter(
-      (b) => !(b.blockerId === uid && b.blockedUserId === targetId)
-    );
-    saveInteractions(interactions);
+    const blockDocId = `${uid}_${targetId}`;
+    try {
+      await deleteDoc(doc(db, 'blocks', blockDocId));
+    } catch {
+      // Ignore
+    }
     return { unblocked: true } as unknown as T;
   }
 
   if (path === '/safety/report' && method === 'POST') {
     const uid = auth.currentUser?.uid || '';
-    const interactions = loadInteractions();
-    const report = {
-      id: `rep_${Date.now().toString(36)}`,
-      reporter_id: uid,
-      reporterName: auth.currentUser?.displayName || 'Member',
-      reported_user_id: String(body.reportedUserId || 'usr_stranger'),
-      reportedName: 'Reported Member',
-      reportedStatus: 'active',
-      context_type: String(body.contextType || 'random_video'),
-      reason: String(body.reason || 'harassment_or_abuse'),
-      details: String(body.details || ''),
-      status: 'open',
-      priority: 'normal',
-      created_at: new Date().toISOString(),
-    };
-    interactions.reports.unshift(report);
-    saveInteractions(interactions);
-    return { reportId: report.id, status: 'open' } as unknown as T;
+    if (!uid) throw new Error('Sign in required');
+    const reportId = `rep_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+    try {
+      await setDoc(doc(db, 'reports', reportId), {
+        id: reportId,
+        reporterId: uid,
+        reportedUserId: String(body.reportedUserId || ''),
+        contextType: String(body.contextType || 'random_text'),
+        reason: String(body.reason || 'harassment_or_abuse'),
+        details: String(body.details || '').slice(0, 1000),
+        status: 'open',
+        createdAt: serverTimestamp(),
+      });
+      return { reportId, status: 'open' } as unknown as T;
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `reports/${reportId}`);
+    }
   }
 
   return {} as unknown as T;
