@@ -3,10 +3,10 @@
  *
  * Architecture:
  * 1. Worker-First Routing:
- *    - /ws: WebSocket upgrade for Durable Object matchmaking
+ *    - /ws: Authenticated WebSocket upgrade routed to `MatchmakerDurableObject` (`env.MATCHMAKER_DO`)
  *    - /api/*: Complete REST API handler matching all 22 endpoints in server.ts
- * 2. Stateless HMAC-Signed Edge Tokens + In-Memory State:
- *    - Ensures sessions persist seamlessly across multiple Cloudflare edge isolates
+ * 2. Stateless HMAC-Signed Edge Tokens + Shared Edge State (`./edge-auth`):
+ *    - Ensures sessions persist seamlessly across Cloudflare Worker and Durable Object isolates
  * 3. Static Assets & SPA Fallback:
  *    - Serves compiled React Vite SPA from `dist/`
  *    - Deep links (/login, /signup, /dashboard, /discover, /membership, etc.)
@@ -15,8 +15,29 @@
 
 import crypto from 'node:crypto';
 import { MatchmakerDurableObject } from './matchmaker-do';
+import {
+  SEEDED_INTERESTS,
+  EDGE_USERS,
+  EDGE_SESSIONS,
+  EDGE_REVOKED_TOKENS,
+  EDGE_BLOCKS,
+  NOW_ISO,
+  ACTIVE_EXPIRY_ISO,
+  createStatelessToken,
+  verifyStatelessToken,
+  type EdgeUser,
+  type EdgeInterest,
+} from './edge-auth';
 
-export { MatchmakerDurableObject };
+export {
+  MatchmakerDurableObject,
+  SEEDED_INTERESTS,
+  EDGE_USERS,
+  createStatelessToken,
+  verifyStatelessToken,
+  type EdgeUser,
+  type EdgeInterest,
+};
 
 export interface Env {
   ASSETS?: {
@@ -43,243 +64,18 @@ export interface Env {
   MEMBERSHIP_DURATION_DAYS?: string;
 }
 
-export interface EdgeInterest {
-  id: string;
-  slug: string;
-  label_en: string;
-  label_si: string;
-  label_ta: string;
-  category: string;
+// Fallback in-process Durable Object instance if env.MATCHMAKER_DO is not bound in local/preview environments
+let fallbackMatchmakerInstance: MatchmakerDurableObject | null = null;
+function getMatchmakerStub(env: Env): { fetch(req: Request): Promise<Response> } {
+  if (env.MATCHMAKER_DO && typeof env.MATCHMAKER_DO.idFromName === 'function') {
+    const id = env.MATCHMAKER_DO.idFromName('sri-lanka-primary-pool');
+    return env.MATCHMAKER_DO.get(id);
+  }
+  if (!fallbackMatchmakerInstance) {
+    fallbackMatchmakerInstance = new MatchmakerDurableObject(null, env);
+  }
+  return fallbackMatchmakerInstance;
 }
-
-export const SEEDED_INTERESTS: EdgeInterest[] = [
-  { id: 'int_tea', slug: 'ceylon-tea-cafes', label_en: 'Ceylon Tea & Cafés', label_si: 'තේ සහ කැෆේ', label_ta: 'தேநீர் & கபேக்கள்', category: 'Culture & Food' },
-  { id: 'int_cinema', slug: 'world-cinema', label_en: 'Independent Cinema', label_si: 'සිනමාව', label_ta: 'சினிமா', category: 'Arts' },
-  { id: 'int_architecture', slug: 'tropical-architecture', label_en: 'Tropical Architecture', label_si: 'ගෘහ නිර්මාණ ශිල්පය', label_ta: 'கட்டிடக்கலை', category: 'Design' },
-  { id: 'int_coastal', slug: 'southern-coast', label_en: 'Southern Coast Escapes', label_si: 'දකුණු වෙරළ තීරය', label_ta: 'தெற்கு கடற்கரை', category: 'Travel' },
-  { id: 'int_literature', slug: 'literature-poetry', label_en: 'Literature & Poetry', label_si: 'සාහිත්‍යය සහ කවි', label_ta: 'இலக்கியம் & கவிதை', category: 'Arts' },
-  { id: 'int_music', slug: 'live-acoustic-jazz', label_en: 'Live Acoustic & Jazz', label_si: 'සංගීතය', label_ta: 'இசை', category: 'Music' },
-  { id: 'int_photography', slug: 'film-photography', label_en: '35mm Film Photography', label_si: 'ඡායාරූපකරණය', label_ta: 'புகைப்படக்கலை', category: 'Arts' },
-  { id: 'int_hillcountry', slug: 'hill-country-trails', label_en: 'Hill Country Trails', label_si: 'කඳුකර සංචාර', label_ta: 'மலையகப் பயணம்', category: 'Outdoors' },
-  { id: 'int_culinary', slug: 'contemporary-sri-lankan-cuisine', label_en: 'Island Gastronomy', label_si: 'ආහාර සංස්කෘතිය', label_ta: 'உணவு கலாச்சாரம்', category: 'Culture & Food' },
-  { id: 'int_philosophy', slug: 'late-night-conversations', label_en: 'Late-Night Conversations', label_si: 'ගැඹුරු සංවාද', label_ta: 'ஆழமான உரையாடல்கள்', category: 'Lifestyle' },
-  { id: 'int_art', slug: 'colombo-galleries', label_en: 'Galleries & Contemporary Art', label_si: 'චිත්‍ර කලාව', label_ta: 'நவீன கலை', category: 'Arts' },
-  { id: 'int_cricket', slug: 'island-cricket-evenings', label_en: 'Test Cricket & Evenings', label_si: 'ක්‍රිකට්', label_ta: 'கிரிக்கெட்', category: 'Sports' },
-];
-
-export interface EdgeUser {
-  id: string;
-  email: string;
-  displayName: string;
-  age: number;
-  emailVerified: boolean;
-  emailVerificationTokenHint: string | null;
-  role: 'member' | 'moderator' | 'admin';
-  accountStatus: 'active' | 'suspended' | 'banned' | 'deleted';
-  onboardingCompleted: boolean;
-  preferredLanguage: 'en' | 'si' | 'ta';
-  createdAt: string;
-  profile: {
-    avatarUrl: string;
-    bio: string;
-    region: string;
-    showRegion: boolean;
-    datingIntention: 'long_term_story' | 'meaningful_dating' | 'new_conversations' | 'friendship_first';
-    spokenLanguages: string[];
-    discoverable: boolean;
-    allowRandomVideo: boolean;
-    allowRandomText: boolean;
-  };
-  interests: EdgeInterest[];
-  membership: {
-    planName: string;
-    priceLkr: number;
-    status: 'inactive' | 'active' | 'expired';
-    startsAt: string | null;
-    expiresAt: string | null;
-  };
-}
-
-const NOW_ISO = '2026-02-01T10:00:00.000Z';
-const ACTIVE_EXPIRY_ISO = '2027-12-31T23:59:59.000Z';
-
-const EDGE_USERS: Map<string, EdgeUser> = new Map([
-  [
-    'usr_admin',
-    {
-      id: 'usr_admin',
-      email: 'admin@onceuponatime.lk',
-      displayName: 'Nalin (Trust & Safety Lead)',
-      age: 31,
-      emailVerified: true,
-      emailVerificationTokenHint: null,
-      role: 'admin',
-      accountStatus: 'active',
-      onboardingCompleted: true,
-      preferredLanguage: 'en',
-      createdAt: NOW_ISO,
-      profile: {
-        avatarUrl: '/src/assets/images/editorial_portrait_kavan_1793978350314.jpg',
-        bio: 'Once Upon a Time Trust, Safety & Operations Lead · Sri Lanka',
-        region: 'Colombo 03',
-        showRegion: true,
-        datingIntention: 'long_term_story',
-        spokenLanguages: ['English', 'Sinhala', 'Tamil'],
-        discoverable: false,
-        allowRandomVideo: true,
-        allowRandomText: true,
-      },
-      interests: [SEEDED_INTERESTS[0], SEEDED_INTERESTS[2], SEEDED_INTERESTS[5]],
-      membership: {
-        planName: 'Once Upon a Time Membership',
-        priceLkr: 500,
-        status: 'active',
-        startsAt: NOW_ISO,
-        expiresAt: ACTIVE_EXPIRY_ISO,
-      },
-    },
-  ],
-  [
-    'usr_amaya',
-    {
-      id: 'usr_amaya',
-      email: 'amaya@onceuponatime.lk',
-      displayName: 'Amaya',
-      age: 26,
-      emailVerified: true,
-      emailVerificationTokenHint: null,
-      role: 'member',
-      accountStatus: 'active',
-      onboardingCompleted: true,
-      preferredLanguage: 'en',
-      createdAt: NOW_ISO,
-      profile: {
-        avatarUrl: '/src/assets/images/editorial_portrait_amaya_1793978349458.jpg',
-        bio: 'Documentary archivist & tea enthusiast. Weekends spent browsing antique bookshops in Galle Fort.',
-        region: 'Colombo 07',
-        showRegion: true,
-        datingIntention: 'meaningful_dating',
-        spokenLanguages: ['English', 'Sinhala'],
-        discoverable: true,
-        allowRandomVideo: true,
-        allowRandomText: true,
-      },
-      interests: [SEEDED_INTERESTS[0], SEEDED_INTERESTS[1], SEEDED_INTERESTS[4]],
-      membership: {
-        planName: 'Once Upon a Time Membership',
-        priceLkr: 500,
-        status: 'active',
-        startsAt: NOW_ISO,
-        expiresAt: ACTIVE_EXPIRY_ISO,
-      },
-    },
-  ],
-  [
-    'usr_kavan',
-    {
-      id: 'usr_kavan',
-      email: 'kavan@onceuponatime.lk',
-      displayName: 'Kavan',
-      age: 28,
-      emailVerified: true,
-      emailVerificationTokenHint: null,
-      role: 'member',
-      accountStatus: 'active',
-      onboardingCompleted: true,
-      preferredLanguage: 'en',
-      createdAt: NOW_ISO,
-      profile: {
-        avatarUrl: '/src/assets/images/editorial_portrait_kavan_1793978350314.jpg',
-        bio: 'Architectural designer. Interested in tropical modernism, analog film, and live jazz sessions.',
-        region: 'Colombo 03',
-        showRegion: true,
-        datingIntention: 'meaningful_dating',
-        spokenLanguages: ['English', 'Sinhala'],
-        discoverable: true,
-        allowRandomVideo: true,
-        allowRandomText: true,
-      },
-      interests: [SEEDED_INTERESTS[2], SEEDED_INTERESTS[5], SEEDED_INTERESTS[6]],
-      membership: {
-        planName: 'Once Upon a Time Membership',
-        priceLkr: 500,
-        status: 'active',
-        startsAt: NOW_ISO,
-        expiresAt: ACTIVE_EXPIRY_ISO,
-      },
-    },
-  ],
-  [
-    'usr_dilini',
-    {
-      id: 'usr_dilini',
-      email: 'dilini@onceuponatime.lk',
-      displayName: 'Dilini',
-      age: 25,
-      emailVerified: true,
-      emailVerificationTokenHint: null,
-      role: 'member',
-      accountStatus: 'active',
-      onboardingCompleted: true,
-      preferredLanguage: 'en',
-      createdAt: NOW_ISO,
-      profile: {
-        avatarUrl: '/src/assets/images/editorial_portrait_dilini_1793978350862.jpg',
-        bio: 'Botanist in the Central Highlands. Passionate about endemic hill flora and quiet rainy evenings.',
-        region: 'Kandy',
-        showRegion: true,
-        datingIntention: 'long_term_story',
-        spokenLanguages: ['Sinhala', 'English'],
-        discoverable: true,
-        allowRandomVideo: true,
-        allowRandomText: true,
-      },
-      interests: [SEEDED_INTERESTS[0], SEEDED_INTERESTS[7], SEEDED_INTERESTS[4]],
-      membership: {
-        planName: 'Once Upon a Time Membership',
-        priceLkr: 500,
-        status: 'active',
-        startsAt: NOW_ISO,
-        expiresAt: ACTIVE_EXPIRY_ISO,
-      },
-    },
-  ],
-  [
-    'usr_ehan',
-    {
-      id: 'usr_ehan',
-      email: 'ehan@onceuponatime.lk',
-      displayName: 'Ehan',
-      age: 27,
-      emailVerified: true,
-      emailVerificationTokenHint: null,
-      role: 'member',
-      accountStatus: 'active',
-      onboardingCompleted: true,
-      preferredLanguage: 'en',
-      createdAt: NOW_ISO,
-      profile: {
-        avatarUrl: '/src/assets/images/editorial_portrait_ehan_1793978352895.jpg',
-        bio: 'Sound designer & record collector. Chasing monsoon recordings and old Ceylon vinyls.',
-        region: 'Jaffna',
-        showRegion: true,
-        datingIntention: 'new_conversations',
-        spokenLanguages: ['Tamil', 'English'],
-        discoverable: true,
-        allowRandomVideo: true,
-        allowRandomText: true,
-      },
-      interests: [SEEDED_INTERESTS[5], SEEDED_INTERESTS[1], SEEDED_INTERESTS[9]],
-      membership: {
-        planName: 'Once Upon a Time Membership',
-        priceLkr: 500,
-        status: 'active',
-        startsAt: NOW_ISO,
-        expiresAt: ACTIVE_EXPIRY_ISO,
-      },
-    },
-  ],
-]);
 
 interface EdgeMatch {
   id: string;
@@ -321,7 +117,6 @@ const EDGE_MESSAGES: EdgeDirectMessage[] = [
   },
 ];
 
-const EDGE_SESSIONS: Map<string, string> = new Map();
 const EDGE_RESET_CODES: Map<string, string> = new Map();
 const EDGE_PASSES: Set<string> = new Set();
 const EDGE_LIKES: Set<string> = new Set([
@@ -330,14 +125,6 @@ const EDGE_LIKES: Set<string> = new Set([
   'usr_dilini:usr_amaya',
   'usr_ehan:usr_amaya',
 ]);
-const EDGE_BLOCKS: Array<{
-  id: string;
-  blockerId: string;
-  blockedUserId: string;
-  blockedDisplayName: string;
-  reason: string;
-  createdAt: string;
-}> = [];
 const EDGE_REPORTS: Array<{
   id: string;
   reporter_id: string;
@@ -381,111 +168,6 @@ const EDGE_PAYMENTS: Array<{
     verified_at: NOW_ISO,
   },
 ];
-
-// -----------------------------------------------------------------------------
-// Stateless HMAC Session Tokens (Persists across Cloudflare Worker Isolates)
-// -----------------------------------------------------------------------------
-function getSecret(env: Env): string {
-  return env.SESSION_SECRET || 'ouat_cloudflare_edge_hmac_secret_2026_lk';
-}
-
-function createStatelessToken(user: EdgeUser, env: Env): string {
-  const payload = Buffer.from(
-    JSON.stringify({
-      id: user.id,
-      email: user.email,
-      displayName: user.displayName,
-      role: user.role,
-      age: user.age,
-      iat: Date.now(),
-    }),
-    'utf8'
-  ).toString('base64url');
-
-  const sig = crypto
-    .createHmac('sha256', getSecret(env))
-    .update(payload)
-    .digest('base64url');
-
-  const token = `ouat_v1.${payload}.${sig}`;
-  EDGE_SESSIONS.set(token, user.id);
-  return token;
-}
-
-function verifyStatelessToken(token: string, env: Env): EdgeUser | null {
-  const existingUserId = EDGE_SESSIONS.get(token);
-  if (existingUserId && EDGE_USERS.has(existingUserId)) {
-    return EDGE_USERS.get(existingUserId)!;
-  }
-
-  if (!token.startsWith('ouat_v1.')) {
-    return null;
-  }
-
-  const parts = token.split('.');
-  if (parts.length !== 3) return null;
-  const [, payload, sig] = parts;
-
-  const expectedSig = crypto
-    .createHmac('sha256', getSecret(env))
-    .update(payload)
-    .digest('base64url');
-
-  if (sig !== expectedSig) return null;
-
-  try {
-    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
-      id: string;
-      email: string;
-      displayName: string;
-      role: 'member' | 'moderator' | 'admin';
-      age?: number;
-    };
-
-    if (EDGE_USERS.has(decoded.id)) {
-      return EDGE_USERS.get(decoded.id)!;
-    }
-
-    // Rehydrate user if this request landed on a fresh Cloudflare edge isolate
-    const rehydrated: EdgeUser = {
-      id: decoded.id,
-      email: decoded.email,
-      displayName: decoded.displayName,
-      age: decoded.age || 25,
-      emailVerified: true,
-      emailVerificationTokenHint: null,
-      role: decoded.role || 'member',
-      accountStatus: 'active',
-      onboardingCompleted: true,
-      preferredLanguage: 'en',
-      createdAt: new Date().toISOString(),
-      profile: {
-        avatarUrl: '/src/assets/images/editorial_portrait_amaya_1793978349458.jpg',
-        bio: 'Member on Once Upon a Time Sri Lanka.',
-        region: 'Colombo',
-        showRegion: true,
-        datingIntention: 'meaningful_dating',
-        spokenLanguages: ['English'],
-        discoverable: true,
-        allowRandomVideo: true,
-        allowRandomText: true,
-      },
-      interests: SEEDED_INTERESTS.slice(0, 3),
-      membership: {
-        planName: 'Once Upon a Time Membership',
-        priceLkr: 500,
-        status: 'active',
-        startsAt: new Date().toISOString(),
-        expiresAt: ACTIVE_EXPIRY_ISO,
-      },
-    };
-    EDGE_USERS.set(rehydrated.id, rehydrated);
-    EDGE_SESSIONS.set(token, rehydrated.id);
-    return rehydrated;
-  } catch {
-    return null;
-  }
-}
 
 function getBearerToken(request: Request): string | null {
   const auth = request.headers.get('Authorization') || '';
@@ -552,6 +234,27 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
+async function fetchRealtimeStats(env: Env) {
+  try {
+    const stub = getMatchmakerStub(env);
+    const res = await stub.fetch(new Request('https://do.internal/internal/stats'));
+    if (res.ok) {
+      return (await res.json()) as {
+        connectedSockets: number;
+        waitingInQueue: number;
+        activeStrangerSessions: number;
+      };
+    }
+  } catch {
+    // Ignore
+  }
+  return {
+    connectedSockets: 0,
+    waitingInQueue: 0,
+    activeStrangerSessions: 0,
+  };
+}
+
 // -----------------------------------------------------------------------------
 // Unified API Request Handler (/api/*)
 // -----------------------------------------------------------------------------
@@ -561,7 +264,6 @@ export async function handleApiRequest(request: Request, env: Env, url: URL): Pr
     return json({ ok: true }, 200);
   }
 
-  // Normalize path: strip trailing slashes and ensure `/api` prefix consistency
   let path = url.pathname.replace(/\/+$/, '') || '/';
   if (!path.startsWith('/api')) {
     path = `/api${path.startsWith('/') ? '' : '/'}${path}`;
@@ -584,6 +286,8 @@ export async function handleApiRequest(request: Request, env: Env, url: URL): Pr
       .map((s) => s.trim())
       .filter(Boolean);
 
+    const realtime = await fetchRealtimeStats(env);
+
     return json({
       status: 'ok',
       platform: 'Once Upon a Time',
@@ -597,11 +301,7 @@ export async function handleApiRequest(request: Request, env: Env, url: URL): Pr
       stunServers,
       turnAvailable,
       service: 'Once Upon a Time (OUAT) Cloudflare Edge Worker',
-      realtime: {
-        connectedSockets: 0,
-        waitingInQueue: 0,
-        activeStrangerSessions: 0,
-      },
+      realtime,
     });
   }
 
@@ -765,6 +465,7 @@ export async function handleApiRequest(request: Request, env: Env, url: URL): Pr
     const token = getBearerToken(request);
     if (token) {
       EDGE_SESSIONS.delete(token);
+      EDGE_REVOKED_TOKENS.add(token);
     }
     return json({ success: true });
   }
@@ -972,7 +673,6 @@ export async function handleApiRequest(request: Request, env: Env, url: URL): Pr
     }
 
     EDGE_LIKES.add(`${user.id}:${targetUserId}`);
-    // Seeded profiles reciprocate likes so users can test mutual matching & messaging immediately
     const isSeededPartner = ['usr_amaya', 'usr_kavan', 'usr_dilini', 'usr_ehan'].includes(
       targetUserId
     );
@@ -1213,11 +913,37 @@ export async function handleApiRequest(request: Request, env: Env, url: URL): Pr
     if (!user) return json({ error: 'Authentication required.' }, 401);
     const body = (await request.json().catch(() => ({}))) as {
       targetUserId?: string;
+      sessionId?: string;
       reason?: string;
     };
-    const targetUserId = String(body.targetUserId || '');
+    let targetUserId = String(body.targetUserId || '');
+    const sessionId = String(body.sessionId || '');
+
+    if (!targetUserId && sessionId) {
+      try {
+        const stub = getMatchmakerStub(env);
+        const res = await stub.fetch(
+          new Request('https://do.internal/internal/resolve-peer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sessionId,
+              reporterUserId: user.id,
+              endSession: true,
+            }),
+          })
+        );
+        if (res.ok) {
+          const data = (await res.json()) as { peerUserId?: string | null };
+          targetUserId = String(data.peerUserId || '');
+        }
+      } catch {
+        // Ignore
+      }
+    }
+
     const target = EDGE_USERS.get(targetUserId);
-    if (targetUserId) {
+    if (targetUserId && targetUserId !== user.id) {
       EDGE_BLOCKS.unshift({
         id: `blk_${crypto.randomUUID().slice(0, 8)}`,
         blockerId: user.id,
@@ -1248,17 +974,43 @@ export async function handleApiRequest(request: Request, env: Env, url: URL): Pr
     if (!user) return json({ error: 'Authentication required.' }, 401);
     const body = (await request.json().catch(() => ({}))) as {
       reportedUserId?: string;
+      contextSessionId?: string;
       contextType?: string;
       reason?: string;
       details?: string;
     };
-    const reportedUserId = String(body.reportedUserId || 'usr_kavan');
+    let reportedUserId = String(body.reportedUserId || '');
+    const contextSessionId = String(body.contextSessionId || '');
+
+    if (!reportedUserId && contextSessionId) {
+      try {
+        const stub = getMatchmakerStub(env);
+        const res = await stub.fetch(
+          new Request('https://do.internal/internal/resolve-peer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sessionId: contextSessionId,
+              reporterUserId: user.id,
+              endSession: true,
+            }),
+          })
+        );
+        if (res.ok) {
+          const data = (await res.json()) as { peerUserId?: string | null };
+          reportedUserId = String(data.peerUserId || '');
+        }
+      } catch {
+        // Ignore
+      }
+    }
+
     const reported = EDGE_USERS.get(reportedUserId);
     const report = {
       id: `rep_${crypto.randomUUID().slice(0, 8)}`,
       reporter_id: user.id,
       reporterName: user.displayName,
-      reported_user_id: reportedUserId,
+      reported_user_id: reportedUserId || 'unknown',
       reportedName: reported?.displayName || 'Member',
       reportedStatus: reported?.accountStatus || 'active',
       context_type: body.contextType || 'profile',
@@ -1289,6 +1041,8 @@ export async function handleApiRequest(request: Request, env: Env, url: URL): Pr
       reportsAgainstCount: EDGE_REPORTS.filter((r) => r.reported_user_id === u.id).length,
     }));
 
+    const realtime = await fetchRealtimeStats(env);
+
     return json({
       analytics: {
         totalUsers: EDGE_USERS.size,
@@ -1301,11 +1055,7 @@ export async function handleApiRequest(request: Request, env: Env, url: URL): Pr
           (sum, p) => sum + p.amount_lkr,
           0
         ),
-        realtime: {
-          connectedSockets: 0,
-          waitingInQueue: 0,
-          activeStrangerSessions: 0,
-        },
+        realtime,
       },
       users,
       reports: EDGE_REPORTS,
@@ -1347,17 +1097,33 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // 1. WebSocket Upgrade for Matchmaking
-    if (url.pathname === '/ws' && request.headers.get('Upgrade') === 'websocket') {
-      if (env.MATCHMAKER_DO && typeof env.MATCHMAKER_DO.idFromName === 'function') {
-        const id = env.MATCHMAKER_DO.idFromName('sri-lanka-primary-pool');
-        const stub = env.MATCHMAKER_DO.get(id);
-        return stub.fetch(request);
+    // 1. WebSocket Upgrade for Matchmaking via MatchmakerDurableObject
+    if (url.pathname === '/ws') {
+      if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
+        return new Response(
+          JSON.stringify({ error: 'Expected Upgrade: websocket header.' }),
+          {
+            status: 426,
+            headers: { 'Content-Type': 'application/json', Upgrade: 'websocket' },
+          }
+        );
       }
-      return new Response(
-        'Matchmaker Durable Object binding not configured in this Worker. Realtime WebSockets are active on the primary Node.js server (server.ts).',
-        { status: 503 }
-      );
+
+      // Authenticate session token at Worker edge before forwarding to Durable Object
+      const queryToken = url.searchParams.get('token') || '';
+      const bearerToken = getBearerToken(request) || '';
+      const rawToken = queryToken || bearerToken;
+
+      const verifiedUser = verifyStatelessToken(rawToken, env);
+      if (!verifiedUser) {
+        return new Response(
+          JSON.stringify({ error: 'Unauthorized: invalid or expired session token.' }),
+          { status: 401, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const stub = getMatchmakerStub(env);
+      return stub.fetch(request);
     }
 
     // 2. Worker-First API Routing (/api/*)

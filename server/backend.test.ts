@@ -189,7 +189,296 @@ async function runBackendVerificationTests(): Promise<void> {
   const convoGetRes = await handleApiRequest(convoGetReq, {}, new URL(convoGetReq.url));
   assert.equal(convoGetRes.status, 200, 'GET /api/conversations/:id/messages must return HTTP 200');
 
-  console.log('ALL BACKEND TESTS PASSED.');
+  // 9. Cloudflare MatchmakerDurableObject WebSocket Upgrade (HTTP 101), Auth, Pairing, WebRTC Relay, Skip & Disconnect Suite
+  // Polyfill Cloudflare's WebSocketPair in Node.js test runtime so MatchmakerDurableObject.fetch() runs identically to workerd
+  class MockCloudflareSocket {
+    public peer: MockCloudflareSocket | null = null;
+    public accepted = false;
+    public closed = false;
+    public receivedMessages: Array<Record<string, unknown>> = [];
+    private listeners: Record<string, Array<(ev: Record<string, unknown>) => void>> = {
+      message: [],
+      close: [],
+      error: [],
+    };
+
+    accept(): void {
+      this.accepted = true;
+    }
+
+    addEventListener(type: string, handler: (ev: Record<string, unknown>) => void): void {
+      if (!this.listeners[type]) this.listeners[type] = [];
+      this.listeners[type].push(handler);
+    }
+
+    send(data: string): void {
+      if (this.closed || !this.peer || this.peer.closed) return;
+      const parsed = JSON.parse(data) as Record<string, unknown>;
+      this.peer.receivedMessages.push(parsed);
+      for (const fn of this.peer.listeners.message || []) {
+        fn({ data });
+      }
+    }
+
+    close(code = 1000, reason = ''): void {
+      if (this.closed) return;
+      this.closed = true;
+      for (const fn of this.listeners.close || []) {
+        fn({ code, reason });
+      }
+      if (this.peer && !this.peer.closed) {
+        this.peer.closed = true;
+        for (const fn of this.peer.listeners.close || []) {
+          fn({ code, reason });
+        }
+      }
+    }
+  }
+
+  class MockWebSocketPair {
+    0: MockCloudflareSocket;
+    1: MockCloudflareSocket;
+    constructor() {
+      const client = new MockCloudflareSocket();
+      const server = new MockCloudflareSocket();
+      client.peer = server;
+      server.peer = client;
+      this[0] = client;
+      this[1] = server;
+    }
+  }
+
+  (globalThis as unknown as { WebSocketPair: typeof MockWebSocketPair }).WebSocketPair =
+    MockWebSocketPair;
+
+  const workerModule = await import('../cloudflare/worker');
+  const workerDefault = workerModule.default;
+  const { MatchmakerDurableObject } = workerModule;
+
+  // Create a single shared MatchmakerDurableObject instance and bind it to env.MATCHMAKER_DO
+  const sharedDoInstance = new MatchmakerDurableObject({ id: 'global-sri-lanka-pool' }, {});
+  const workerEnv = {
+    MATCHMAKER_DO: {
+      idFromName: (name: string) => ({ name }),
+      get: () => sharedDoInstance,
+    },
+  };
+
+  // 9a. Reject unauthenticated or forged WebSocket upgrade requests with HTTP 401
+  const invalidWsReq = new Request(
+    'https://once-upon-a-lanka.workers.dev/ws?token=forged_invalid_token',
+    {
+      headers: { Upgrade: 'websocket' },
+    }
+  );
+  const invalidWsRes = await workerDefault.fetch(invalidWsReq, workerEnv);
+  assert.equal(invalidWsRes.status, 401, 'Invalid session token on /ws must be rejected with HTTP 401');
+
+  // 9b. Authenticate second independent user (Kavan) to get a real session token
+  const kavanLoginReq = new Request('https://once-upon-a-lanka.workers.dev/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'kavan@onceuponatime.lk', password: 'OnceUpon2026!' }),
+  });
+  const kavanLoginRes = await handleApiRequest(kavanLoginReq, workerEnv, new URL(kavanLoginReq.url));
+  assert.equal(kavanLoginRes.status, 200, 'Second user (Kavan) login must succeed');
+  const kavanLoginData = (await kavanLoginRes.json()) as { token: string; user: { id: string } };
+
+  // 9c. Upgrade both independent authenticated users (Amaya & Kavan) to WebSockets via /ws
+  const amayaWsReq = new Request(
+    `https://once-upon-a-lanka.workers.dev/ws?token=${encodeURIComponent(loginData.token)}`,
+    { headers: { Upgrade: 'websocket' } }
+  );
+  const amayaWsRes = (await workerDefault.fetch(amayaWsReq, workerEnv)) as Response & {
+    webSocket?: MockCloudflareSocket;
+  };
+  assert.equal(amayaWsRes.status, 101, 'Amaya /ws upgrade must return HTTP 101');
+  assert.ok(amayaWsRes.webSocket, 'Amaya HTTP 101 response must include upgraded client WebSocket');
+
+  const kavanWsReq = new Request(
+    `https://once-upon-a-lanka.workers.dev/ws?token=${encodeURIComponent(kavanLoginData.token)}`,
+    { headers: { Upgrade: 'websocket' } }
+  );
+  const kavanWsRes = (await workerDefault.fetch(kavanWsReq, workerEnv)) as Response & {
+    webSocket?: MockCloudflareSocket;
+  };
+  assert.equal(kavanWsRes.status, 101, 'Kavan /ws upgrade must return HTTP 101');
+  assert.ok(kavanWsRes.webSocket, 'Kavan HTTP 101 response must include upgraded client WebSocket');
+
+  const amayaClient = amayaWsRes.webSocket!;
+  const kavanClient = kavanWsRes.webSocket!;
+
+  assert.equal(
+    amayaClient.receivedMessages[0]?.type,
+    'connection:established',
+    'Amaya must receive connection:established upon WebSocket upgrade'
+  );
+  assert.equal(
+    kavanClient.receivedMessages[0]?.type,
+    'connection:established',
+    'Kavan must receive connection:established upon WebSocket upgrade'
+  );
+
+  // 9d. Both join the video matchmaking queue; verify atomic pairing and ephemeral peer IDs
+  amayaClient.send(JSON.stringify({ type: 'queue:join', mode: 'video' }));
+  assert.equal(
+    amayaClient.receivedMessages.at(-1)?.type,
+    'queue:waiting',
+    'First user joining empty queue must receive queue:waiting'
+  );
+
+  kavanClient.send(JSON.stringify({ type: 'queue:join', mode: 'video' }));
+  const amayaMatchMsg = amayaClient.receivedMessages.at(-1) as {
+    type: string;
+    sessionId: string;
+    mode: string;
+    initiator: boolean;
+    partner: { ephemeralPeerId: string; displayName: string };
+  };
+  const kavanMatchMsg = kavanClient.receivedMessages.at(-1) as {
+    type: string;
+    sessionId: string;
+    mode: string;
+    initiator: boolean;
+    partner: { ephemeralPeerId: string; displayName: string };
+  };
+
+  assert.equal(amayaMatchMsg.type, 'match:found', 'Amaya must receive match:found when Kavan joins');
+  assert.equal(kavanMatchMsg.type, 'match:found', 'Kavan must receive match:found when joining');
+  assert.equal(amayaMatchMsg.sessionId, kavanMatchMsg.sessionId, 'Both partners must share the same sessionId');
+  assert.equal(amayaMatchMsg.initiator, true, 'Waiting user (Amaya) must be designated WebRTC initiator');
+  assert.equal(kavanMatchMsg.initiator, false, 'Joining user (Kavan) must be non-initiator');
+  assert.ok(
+    amayaMatchMsg.partner.ephemeralPeerId.startsWith('peer_') &&
+      !amayaMatchMsg.partner.ephemeralPeerId.includes('usr_'),
+    'Partner ID must be an ephemeral peer_ token, never exposing internal usr_ ID'
+  );
+
+  const activeSessionId = amayaMatchMsg.sessionId;
+
+  // 9e. Relay WebRTC SDP Offer, SDP Answer, and ICE candidates between matched partners
+  const mockOffer = { type: 'offer', sdp: 'v=0\r\no=- 12345 2 IN IP4 127.0.0.1\r\n' };
+  amayaClient.send(
+    JSON.stringify({
+      type: 'webrtc:sdp',
+      sessionId: activeSessionId,
+      data: mockOffer,
+    })
+  );
+  const kavanSdpMsg = kavanClient.receivedMessages.at(-1) as {
+    type: string;
+    sessionId: string;
+    data: { type: string; sdp: string };
+  };
+  assert.equal(kavanSdpMsg.type, 'webrtc:sdp', 'Kavan must receive relayed WebRTC SDP offer');
+  assert.equal(kavanSdpMsg.data.type, 'offer', 'Relayed SDP must preserve offer payload');
+
+  const mockAnswer = { type: 'answer', sdp: 'v=0\r\no=- 67890 2 IN IP4 127.0.0.1\r\n' };
+  kavanClient.send(
+    JSON.stringify({
+      type: 'webrtc:sdp',
+      sessionId: activeSessionId,
+      data: mockAnswer,
+    })
+  );
+  const amayaSdpMsg = amayaClient.receivedMessages.at(-1) as {
+    type: string;
+    sessionId: string;
+    data: { type: string; sdp: string };
+  };
+  assert.equal(amayaSdpMsg.type, 'webrtc:sdp', 'Amaya must receive relayed WebRTC SDP answer');
+  assert.equal(amayaSdpMsg.data.type, 'answer', 'Relayed SDP must preserve answer payload');
+
+  const mockIce = { candidate: 'candidate:1 1 UDP 2122252543 192.0.2.1 54321 typ host', sdpMid: '0' };
+  amayaClient.send(
+    JSON.stringify({
+      type: 'webrtc:ice',
+      sessionId: activeSessionId,
+      data: mockIce,
+    })
+  );
+  const kavanIceMsg = kavanClient.receivedMessages.at(-1) as {
+    type: string;
+    data: { candidate: string };
+  };
+  assert.equal(kavanIceMsg.type, 'webrtc:ice', 'Kavan must receive relayed WebRTC ICE candidate');
+  assert.equal(kavanIceMsg.data.candidate, mockIce.candidate, 'Relayed ICE candidate must match');
+
+  // 9f. Relay ephemeral text message, typing indicator, and media state
+  amayaClient.send(
+    JSON.stringify({
+      type: 'stranger:typing',
+      sessionId: activeSessionId,
+    })
+  );
+  assert.equal(
+    kavanClient.receivedMessages.at(-1)?.type,
+    'stranger:typing',
+    'Kavan must receive stranger:typing indicator'
+  );
+
+  amayaClient.send(
+    JSON.stringify({
+      type: 'stranger:media-state',
+      sessionId: activeSessionId,
+      data: { cameraOn: false, micOn: true },
+    })
+  );
+  const kavanMediaMsg = kavanClient.receivedMessages.at(-1) as {
+    type: string;
+    data: { cameraOn: boolean; micOn: boolean };
+  };
+  assert.equal(kavanMediaMsg.type, 'stranger:media-state', 'Kavan must receive stranger:media-state');
+  assert.equal(kavanMediaMsg.data.cameraOn, false, 'Media state cameraOn=false must be relayed');
+
+  amayaClient.send(
+    JSON.stringify({
+      type: 'stranger:message',
+      sessionId: activeSessionId,
+      data: { text: 'Ayubowan Kavan from Colombo!' },
+    })
+  );
+  const kavanChatMsg = kavanClient.receivedMessages.at(-1) as {
+    type: string;
+    data: { text: string };
+  };
+  assert.equal(kavanChatMsg.type, 'stranger:message', 'Kavan must receive stranger:message');
+  assert.equal(
+    kavanChatMsg.data.text,
+    'Ayubowan Kavan from Colombo!',
+    'Relayed message text must match'
+  );
+
+  // 9g. Test stranger:skip — notifies partner with stranger:disconnected and re-queues skipping user
+  amayaClient.send(JSON.stringify({ type: 'stranger:skip', mode: 'video' }));
+  assert.equal(
+    kavanClient.receivedMessages.at(-1)?.type,
+    'stranger:disconnected',
+    'Partner (Kavan) must receive stranger:disconnected when Amaya skips'
+  );
+  assert.equal(
+    amayaClient.receivedMessages.at(-1)?.type,
+    'queue:waiting',
+    'Skipping user (Amaya) must automatically re-enter queue:waiting'
+  );
+
+  // 9h. Pair again and verify abrupt WebSocket disconnect cleanup
+  kavanClient.send(JSON.stringify({ type: 'queue:join', mode: 'video' }));
+  assert.equal(
+    amayaClient.receivedMessages.at(-1)?.type,
+    'match:found',
+    'Amaya and Kavan must match again when Kavan rejoins queue'
+  );
+
+  amayaClient.close(1001, 'Tab closed');
+  assert.equal(
+    kavanClient.receivedMessages.at(-1)?.type,
+    'stranger:disconnected',
+    'Kavan must immediately receive stranger:disconnected when Amaya closes her WebSocket'
+  );
+  kavanClient.close(1000, 'Done');
+
+  console.log('ALL BACKEND & DURABLE OBJECT WEBSOCKET TESTS PASSED.');
 }
 
 runBackendVerificationTests().catch((err) => {

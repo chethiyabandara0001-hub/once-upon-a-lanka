@@ -53,16 +53,18 @@ STUN_SERVERS = "stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302"
 # migrations_dir = "cloudflare/migrations"
 
 # ----------------------------------------------------------------------------
-# 2. Cloudflare Durable Objects (Optional — Requires Cloudflare Workers Paid $5/mo)
+# 2. Cloudflare Durable Objects (Enabled — MatchmakerDurableObject for /ws)
+# Uses SQLite-backed Durable Objects (new_sqlite_classes), supported on both
+# Cloudflare Workers Free and Paid plans.
 # ----------------------------------------------------------------------------
-# [durable_objects]
-# bindings = [
-#   { name = "MATCHMAKER_DO", class_name = "MatchmakerDurableObject" }
-# ]
-#
-# [[migrations]]
-# tag = "v1"
-# new_sqlite_classes = ["MatchmakerDurableObject"]
+[durable_objects]
+bindings = [
+  { name = "MATCHMAKER_DO", class_name = "MatchmakerDurableObject" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MatchmakerDurableObject"]
 
 # ----------------------------------------------------------------------------
 # 3. Cloudflare R2 Object Storage Binding (Optional)

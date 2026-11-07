@@ -47,8 +47,15 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
 }) => {
   const [mode, setMode] = useState<'video' | 'text'>('video');
   const [wsConnected, setWsConnected] = useState(false);
+  const [wsStatus, setWsStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
+  const [wsError, setWsError] = useState<string | null>(null);
+  const [wsAttempt, setWsAttempt] = useState(0);
   const [stage, setStage] = useState<'idle' | 'waiting' | 'matched'>('idle');
   const [partner, setPartner] = useState<MatchedPartnerMeta | null>(null);
+  const [partnerMedia, setPartnerMedia] = useState<{ cameraOn: boolean; micOn: boolean }>({
+    cameraOn: true,
+    micOn: true,
+  });
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [partnerTyping, setPartnerTyping] = useState(false);
 
@@ -203,23 +210,86 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
   };
 
   useEffect(() => {
-    const ws = new WebSocket(buildWebSocketUrl());
+    let unmounted = false;
+    setWsConnected(false);
+    setWsStatus('connecting');
+    setWsError(null);
+
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(buildWebSocketUrl());
+    } catch {
+      setWsStatus('error');
+      setWsError(
+        'Could not initialize WebSocket connection. Please verify your network connection and try reconnecting.'
+      );
+      return;
+    }
+
     wsRef.current = ws;
+    let opened = false;
+
+    const connectTimeout = window.setTimeout(() => {
+      if (!unmounted && ws.readyState !== WebSocket.OPEN) {
+        setWsConnected(false);
+        setWsStatus('error');
+        setWsError(
+          'Real-time signaling connection timed out. Please click "Reconnect Signaling" below.'
+        );
+        try {
+          ws.close();
+        } catch {
+          // Ignore
+        }
+      }
+    }, 8000);
 
     ws.onopen = () => {
+      if (unmounted) return;
+      opened = true;
+      window.clearTimeout(connectTimeout);
       setWsConnected(true);
+      setWsStatus('connected');
+      setWsError(null);
     };
 
-    ws.onclose = () => {
+    ws.onerror = () => {
+      if (unmounted) return;
+      window.clearTimeout(connectTimeout);
+      setWsConnected(false);
+      setWsStatus('error');
+      setWsError(
+        'WebSocket handshake failed (/ws). Ensure your session is valid and the Matchmaker Durable Object is deployed, or click "Reconnect Signaling".'
+      );
+    };
+
+    ws.onclose = (event) => {
+      if (unmounted) return;
+      window.clearTimeout(connectTimeout);
       setWsConnected(false);
       setStage('idle');
       cleanupPeerConnection();
+      if (!opened || event.code !== 1000) {
+        setWsStatus('error');
+        setWsError(
+          event.reason
+            ? `Signaling connection closed: ${event.reason}`
+            : 'Real-time signaling connection closed unexpectedly. Click "Reconnect Signaling" to resume.'
+        );
+      }
     };
 
     ws.onmessage = async (event) => {
       try {
         const msg = JSON.parse(event.data);
         const type = String(msg.type || '');
+
+        if (type === 'connection:established') {
+          setWsConnected(true);
+          setWsStatus('connected');
+          setWsError(null);
+          return;
+        }
 
         if (type === 'queue:waiting') {
           setStage('waiting');
@@ -235,6 +305,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
           sessionIdRef.current = sid;
           setActiveSessionId(sid);
           setPartner(msg.partner as MatchedPartnerMeta);
+          setPartnerMedia({ cameraOn: true, micOn: true });
           setStage('matched');
           setMessages([
             {
@@ -313,6 +384,14 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
           return;
         }
 
+        if (type === 'stranger:media-state' && msg.data) {
+          setPartnerMedia({
+            cameraOn: msg.data.cameraOn !== false,
+            micOn: msg.data.micOn !== false,
+          });
+          return;
+        }
+
         if (type === 'stranger:disconnected') {
           cleanupPeerConnection();
           setMessages((prev) => [
@@ -320,7 +399,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
             {
               id: `sys_disc_${Date.now()}`,
               sender: 'system',
-              text: 'Stranger disconnected. Click "Next stranger" to meet someone new.',
+              text: 'Stranger disconnected. Click "Start video chat" or "Next" to meet someone new.',
               timestamp: new Date().toLocaleTimeString([], {
                 hour: '2-digit',
                 minute: '2-digit',
@@ -338,11 +417,13 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
     };
 
     return () => {
+      unmounted = true;
+      window.clearTimeout(connectTimeout);
       cleanupPeerConnection();
       stopLocalMedia();
-      ws.close();
+      ws.close(1000, 'Component unmounted');
     };
-  }, []);
+  }, [wsAttempt]);
 
   useEffect(() => {
     if (stage !== 'waiting') return;
@@ -352,8 +433,20 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
     return () => window.clearInterval(interval);
   }, [stage]);
 
+  const handleReconnectSignaling = () => {
+    setWsAttempt((prev) => prev + 1);
+  };
+
   const handleJoinQueue = async (selectedMode: 'video' | 'text') => {
     setSafetyFeedback(null);
+    if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      setWsStatus('error');
+      setWsError(
+        'Cannot join matchmaking queue because the WebSocket signaling connection is not open. Click "Reconnect Signaling" first.'
+      );
+      return;
+    }
+
     setMode(selectedMode);
     if (selectedMode === 'video') {
       await ensureLocalMedia();
@@ -361,9 +454,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
       stopLocalMedia();
     }
 
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'queue:join', mode: selectedMode }));
-    }
+    wsRef.current.send(JSON.stringify({ type: 'queue:join', mode: selectedMode }));
   };
 
   const handleSkipPartner = () => {
@@ -393,6 +484,15 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
         t.enabled = nextState;
       });
     }
+    if (activeSessionId && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'stranger:media-state',
+          sessionId: activeSessionId,
+          data: { cameraOn: nextState, micOn },
+        })
+      );
+    }
   };
 
   const toggleMic = () => {
@@ -402,6 +502,15 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
       localStreamRef.current.getAudioTracks().forEach((t) => {
         t.enabled = nextState;
       });
+    }
+    if (activeSessionId && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'stranger:media-state',
+          sessionId: activeSessionId,
+          data: { cameraOn, micOn: nextState },
+        })
+      );
     }
   };
 
@@ -512,12 +621,62 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
             <span className="text-[#849187]">(TURN optional)</span>
           </div>
 
-          <div className="flex items-center gap-2 text-xs font-bold text-[#14201b] bg-white px-4 py-2 rounded-full border border-[#e7ebe5]">
-            <Radio className={`w-3.5 h-3.5 ${wsConnected ? 'text-[#557d27]' : 'text-amber-600'}`} />
-            <span>{wsConnected ? 'Signaling Ready' : 'Connecting...'}</span>
+          <div
+            className={`flex items-center gap-2 text-xs font-bold px-4 py-2 rounded-full border ${
+              wsStatus === 'connected'
+                ? 'bg-white text-[#14201b] border-[#e7ebe5]'
+                : wsStatus === 'error'
+                ? 'bg-red-50 text-red-900 border-red-200'
+                : 'bg-white text-[#14201b] border-[#e7ebe5]'
+            }`}
+          >
+            <Radio
+              className={`w-3.5 h-3.5 ${
+                wsStatus === 'connected'
+                  ? 'text-[#557d27]'
+                  : wsStatus === 'error'
+                  ? 'text-red-600'
+                  : 'text-amber-600'
+              }`}
+            />
+            <span>
+              {wsStatus === 'connected'
+                ? 'Signaling Ready'
+                : wsStatus === 'error'
+                ? 'Signaling Disconnected'
+                : 'Connecting...'}
+            </span>
+            {wsStatus === 'error' && (
+              <button
+                type="button"
+                onClick={handleReconnectSignaling}
+                className="ml-1 px-2.5 py-0.5 rounded-full bg-red-600 text-white text-[11px] font-extrabold hover:bg-red-700"
+              >
+                Reconnect
+              </button>
+            )}
           </div>
         </div>
       </div>
+
+      {wsError && (
+        <div className="p-4 rounded-2xl bg-red-950 text-red-100 border border-red-500/40 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <ShieldAlert className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-extrabold text-red-200">WebSocket Signaling Connection Error</p>
+              <p className="text-red-200/90 mt-0.5">{wsError}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleReconnectSignaling}
+            className="px-4 py-2 rounded-xl bg-[#c5fa5a] text-[#14201b] font-black text-xs shrink-0 hover:bg-[#d2ff75]"
+          >
+            Reconnect Signaling ↗
+          </button>
+        </div>
+      )}
 
       {safetyFeedback && (
         <div className="p-3.5 rounded-2xl bg-[#dff4b3] text-[#14201b] text-xs font-extrabold">
@@ -542,15 +701,17 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
               <div className="flex flex-wrap items-center justify-center gap-3">
                 <button
                   type="button"
+                  disabled={!wsConnected}
                   onClick={() => handleJoinQueue('video')}
-                  className="px-6 py-4 bg-[#c5fa5a] hover:bg-[#d2ff75] text-[#132014] font-black text-sm rounded-[15px]"
+                  className="px-6 py-4 bg-[#c5fa5a] hover:bg-[#d2ff75] disabled:opacity-50 text-[#132014] font-black text-sm rounded-[15px]"
                 >
                   ◉ &nbsp; Start video chat ↗
                 </button>
                 <button
                   type="button"
+                  disabled={!wsConnected}
                   onClick={() => handleJoinQueue('text')}
-                  className="px-6 py-4 bg-white/10 hover:bg-white/15 border border-white/30 text-white font-extrabold text-sm rounded-[15px]"
+                  className="px-6 py-4 bg-white/10 hover:bg-white/15 disabled:opacity-50 border border-white/30 text-white font-extrabold text-sm rounded-[15px]"
                 >
                   ▤ &nbsp; Start text chat
                 </button>
@@ -608,10 +769,20 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
                     </div>
                   )}
 
-                  <div className="absolute top-4 left-4 bg-[#101417]/80 px-4 py-2 rounded-full border border-white/15 text-xs font-bold flex items-center gap-2">
+                  <div className="absolute top-4 left-4 bg-[#101417]/80 px-4 py-2 rounded-full border border-white/15 text-xs font-bold flex flex-wrap items-center gap-2">
                     <span className="text-[#c5fa5a]">●</span>
                     <span>{partner?.displayName}</span>
                     {partner?.region && <span> · {partner.region}</span>}
+                    {!partnerMedia.cameraOn && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/20 text-red-200">
+                        Camera Off
+                      </span>
+                    )}
+                    {!partnerMedia.micOn && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/20 text-red-200">
+                        Muted
+                      </span>
+                    )}
                     <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/10 text-[#c5fa5a]">
                       {iceState === 'connected' || iceState === 'completed'
                         ? 'P2P Live'
