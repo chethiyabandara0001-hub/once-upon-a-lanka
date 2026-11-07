@@ -2,10 +2,22 @@
 # ONCE UPON A TIME (OUAT) — CLOUDFLARE DEPLOYMENT CONFIGURATION
 # ============================================================================
 
-name = "once-upon-a-time-lk"
+name = "once-upon-a-lanka"
 main = "cloudflare/worker.ts"
 compatibility_date = "2026-03-01"
 compatibility_flags = ["nodejs_compat"]
+
+# ----------------------------------------------------------------------------
+# STATIC ASSETS CONFIGURATION
+# Serves the compiled React Vite frontend from dist/ with SPA client-side
+# routing fallback for deep-links (/login, /signup, /dashboard, /discover, etc.)
+# and worker-first routing for /api/* and /ws WebSocket requests.
+# ----------------------------------------------------------------------------
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = true
 
 [vars]
 APP_ENV = "production"
@@ -20,12 +32,10 @@ STUN_SERVERS = "stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302"
 # 1. Cloudflare D1 Database Binding (Optional)
 # ----------------------------------------------------------------------------
 # Cloudflare requires an actual database created in your Cloudflare account.
-# If database_id is a dummy/placeholder UUID (like 00000000-0000-0000-0000-000000000000),
-# Cloudflare API rejects the deployment with error [code: 10181].
+# If database_id is a dummy/placeholder UUID, Cloudflare rejects deploy with [code: 10181].
 #
 # To enable D1:
-#   Step 1: Run `npx wrangler d1 create ouat-production-d1` in your terminal
-#           OR create it in Cloudflare Dashboard: Workers & Pages -> D1 SQL Databases
+#   Step 1: Run `npx wrangler d1 create ouat-production-d1`
 #   Step 2: Copy the generated database_id UUID
 #   Step 3: Uncomment the [[d1_databases]] block below and paste your database_id:
 #
@@ -38,9 +48,6 @@ STUN_SERVERS = "stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302"
 # ----------------------------------------------------------------------------
 # 2. Cloudflare Durable Objects (Optional — Requires Cloudflare Workers Paid $5/mo)
 # ----------------------------------------------------------------------------
-# If you are on the Cloudflare Free Plan ($0), leave this commented out to prevent
-# subscription requirement errors during deployment.
-#
 # [durable_objects]
 # bindings = [
 #   { name = "MATCHMAKER_DO", class_name = "MatchmakerDurableObject" }
@@ -53,8 +60,6 @@ STUN_SERVERS = "stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302"
 # ----------------------------------------------------------------------------
 # 3. Cloudflare R2 Object Storage Binding (Optional)
 # ----------------------------------------------------------------------------
-# Uncomment once you create an R2 bucket in Cloudflare Dashboard (Storage -> R2):
-#
 # [[r2_buckets]]
 # binding = "AVATAR_BUCKET"
 # bucket_name = "ouat-profile-avatars"

@@ -221,26 +221,34 @@ class NormalizedDatabase {
   public state: DatabaseSchema;
 
   constructor() {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    if (fs.existsSync(DB_FILE)) {
-      try {
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      if (fs.existsSync(DB_FILE)) {
         const raw = fs.readFileSync(DB_FILE, 'utf-8');
         this.state = JSON.parse(raw) as DatabaseSchema;
         return;
-      } catch {
-        // Re-initialize if corrupted
       }
+    } catch {
+      // In-memory fallback if file system is read-only or running in serverless edge worker
     }
     this.state = this.createSeededDatabase();
-    this.save();
+    try {
+      this.save();
+    } catch {
+      // Ignore write errors in read-only environments
+    }
   }
 
   public save(): void {
-    const tmpFile = `${DB_FILE}.tmp`;
-    fs.writeFileSync(tmpFile, JSON.stringify(this.state, null, 2), 'utf-8');
-    fs.renameSync(tmpFile, DB_FILE);
+    try {
+      const tmpFile = `${DB_FILE}.tmp`;
+      fs.writeFileSync(tmpFile, JSON.stringify(this.state, null, 2), 'utf-8');
+      fs.renameSync(tmpFile, DB_FILE);
+    } catch {
+      // Ignore write errors in serverless edge environments
+    }
   }
 
   public logAudit(params: {
