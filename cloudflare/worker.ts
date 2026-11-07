@@ -32,9 +32,15 @@ export default {
 
     // WebSocket upgrade for Random Video / Text Matchmaking via Durable Object
     if (url.pathname === '/ws' && request.headers.get('Upgrade') === 'websocket') {
-      const id = env.MATCHMAKER_DO.idFromName('sri-lanka-primary-pool');
-      const stub = env.MATCHMAKER_DO.get(id);
-      return stub.fetch(request);
+      if (env.MATCHMAKER_DO && typeof env.MATCHMAKER_DO.idFromName === 'function') {
+        const id = env.MATCHMAKER_DO.idFromName('sri-lanka-primary-pool');
+        const stub = env.MATCHMAKER_DO.get(id);
+        return stub.fetch(request);
+      }
+      return new Response(
+        'Matchmaker Durable Object binding not configured in this Worker. Realtime WebSockets are active on the primary Node.js server (server.ts).',
+        { status: 503 }
+      );
     }
 
     if (url.pathname === '/api/health') {
