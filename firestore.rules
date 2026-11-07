@@ -487,10 +487,10 @@ service cloud.firestore {
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         (incoming().initiatorId == request.auth.uid || incoming().answererId == request.auth.uid) &&
-        exists(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)) &&
-        get(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)).data.status == 'active' &&
-        get(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)).data.userAId == incoming().initiatorId &&
-        get(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)).data.userBId == incoming().answererId;
+        existsAfter(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)) &&
+        getAfter(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)).data.status == 'active' &&
+        getAfter(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)).data.userAId == incoming().initiatorId &&
+        getAfter(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)).data.userBId == incoming().answererId;
 
       allow update: if isSignedIn() &&
         isValidId(sessionId) &&

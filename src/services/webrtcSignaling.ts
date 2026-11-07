@@ -84,41 +84,79 @@ const DEFAULT_STUN_SERVERS: RTCIceServer[] = [
   },
 ];
 
+let cachedIceConfig: {
+  data: IceServerConfigResponse;
+  expiresAt: number;
+} | null = null;
+let inFlightIcePromise: Promise<IceServerConfigResponse> | null = null;
+
 /**
  * Fetches ICE servers (public STUN + optional short-lived TURN credentials)
  * from the backend endpoint `/api/webrtc/ice-servers` using the user's Firebase ID token.
- * Falls back cleanly to public STUN if the endpoint is unreachable or TURN is unconfigured.
+ * Caches the result for 5 minutes so match startup has 0ms ICE config latency.
  */
 export async function fetchIceServerConfiguration(): Promise<IceServerConfigResponse> {
-  try {
-    const fbUser = auth.currentUser;
-    const token = fbUser ? await fbUser.getIdToken() : '';
-    const res = await fetch('/api/webrtc/ice-servers', {
-      method: 'GET',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
-        return {
-          iceServers: data.iceServers,
-          turnConfigured: Boolean(data.turnConfigured),
-          turnProvider: data.turnProvider || 'none',
-        };
-      }
-    }
-  } catch {
-    // Fall back to default public STUN servers
+  if (cachedIceConfig && Date.now() < cachedIceConfig.expiresAt) {
+    return cachedIceConfig.data;
   }
-  return {
-    iceServers: DEFAULT_STUN_SERVERS,
-    turnConfigured: false,
-    turnProvider: 'none',
-  };
+  if (inFlightIcePromise) {
+    return inFlightIcePromise;
+  }
+
+  inFlightIcePromise = (async (): Promise<IceServerConfigResponse> => {
+    try {
+      const fbUser = auth.currentUser;
+      const token = fbUser ? await fbUser.getIdToken() : '';
+      const res = await fetch('/api/webrtc/ice-servers', {
+        method: 'GET',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+          const config: IceServerConfigResponse = {
+            iceServers: data.iceServers,
+            turnConfigured: Boolean(data.turnConfigured),
+            turnProvider: data.turnProvider || 'none',
+          };
+          cachedIceConfig = {
+            data: config,
+            expiresAt: Date.now() + 5 * 60 * 1000,
+          };
+          return config;
+        }
+      }
+    } catch {
+      // Fall back to default public STUN servers
+    }
+    const fallback: IceServerConfigResponse = {
+      iceServers: DEFAULT_STUN_SERVERS,
+      turnConfigured: false,
+      turnProvider: 'none',
+    };
+    cachedIceConfig = {
+      data: fallback,
+      expiresAt: Date.now() + 2 * 60 * 1000,
+    };
+    return fallback;
+  })();
+
+  try {
+    return await inFlightIcePromise;
+  } finally {
+    inFlightIcePromise = null;
+  }
 }
 
 /**
- * Applies a ~500 kbps maximum video bitrate cap and degradation preference ('maintain-framerate')
+ * Pre-warms the ICE server configuration cache while the user enters the queue.
+ */
+export function prefetchIceServers(): void {
+  fetchIceServerConfiguration().catch(() => {});
+}
+
+/**
+ * Applies a ~500 kbps maximum video bitrate cap and degradation preference ('balanced')
  * to the outgoing RTCRtpSender so 360p streams stay smooth even on constrained mobile networks.
  */
 export async function apply360pBitrateConstraints(pc: RTCPeerConnection): Promise<void> {
@@ -261,6 +299,7 @@ export interface WebRtcControllerCallbacks {
  * Manages the full lifecycle of a single 1-on-1 WebRTC session backed by Firestore `/videoSessions/{sessionId}`.
  * Guarantees:
  * - Deterministic initiator (`initiatorId === userAId`) and answerer (`answererId === userBId`)
+ * - Immediate SDP Offer creation by the initiator without waiting for an extra readiness round-trip
  * - ICE candidate buffering until `remoteDescription` is set
  * - Deduplicated ICE candidates
  * - Bitrate & resolution telemetry polling
@@ -321,9 +360,9 @@ export class WebRtcSessionController {
       role,
       lastError: null,
     });
-    this.callbacks.onCallStatusChange('waiting_partner');
+    this.callbacks.onCallStatusChange('connecting');
 
-    // 1. Fetch STUN + optional TURN configuration
+    // 1. Fetch STUN + optional TURN configuration (cached for 0ms latency)
     const iceConfig = await fetchIceServerConfiguration();
     if (this.isClosed) return;
 
@@ -348,7 +387,7 @@ export class WebRtcSessionController {
     await apply360pBitrateConstraints(pc);
     this.updateLocalTrackDiagnostics();
 
-    // 4. Handle incoming remote media tracks
+    // 4. Handle incoming remote media tracks immediately as soon as frames arrive
     pc.ontrack = (event) => {
       if (this.isClosed) return;
       if (!this.remoteStream) {
@@ -360,11 +399,29 @@ export class WebRtcSessionController {
           if (!this.remoteStream!.getTracks().some((existing) => existing.id === t.id)) {
             this.remoteStream!.addTrack(t);
           }
+          t.onunmute = () => {
+            if (this.isClosed) return;
+            this.clearConnectionTimeout();
+            this.callbacks.onRemoteStream(this.remoteStream);
+            this.callbacks.onCallStatusChange('connected');
+            this.updateRemoteTrackDiagnostics();
+          };
         });
       } else if (event.track) {
-        this.remoteStream.addTrack(event.track);
+        if (!this.remoteStream.getTracks().some((existing) => existing.id === event.track.id)) {
+          this.remoteStream.addTrack(event.track);
+        }
+        event.track.onunmute = () => {
+          if (this.isClosed) return;
+          this.clearConnectionTimeout();
+          this.callbacks.onRemoteStream(this.remoteStream);
+          this.callbacks.onCallStatusChange('connected');
+          this.updateRemoteTrackDiagnostics();
+        };
       }
+      this.clearConnectionTimeout();
       this.callbacks.onRemoteStream(this.remoteStream);
+      this.callbacks.onCallStatusChange('connected');
       this.updateRemoteTrackDiagnostics();
     };
 
@@ -456,9 +513,14 @@ export class WebRtcSessionController {
       }
     };
 
-    // 7. Ensure `/videoSessions/{sessionId}` exists and mark current participant ready
+    // 7. Ensure `/videoSessions/{sessionId}` exists and immediately publish Initiator Offer or Answerer Readiness
     await this.ensureVideoSessionAndMarkReady();
     if (this.isClosed) return;
+
+    if (this.isInitiator) {
+      await this.createAndPublishOffer(1, false);
+      if (this.isClosed) return;
+    }
 
     // 8. Subscribe to remote ICE candidates
     const remoteCandidateSubcol = this.isInitiator
@@ -527,11 +589,9 @@ export class WebRtcSessionController {
           offerRevision: data.offerRevision || 0,
         });
 
-        // Initiator creates and publishes SDP Offer once both peers are ready
+        // Fallback if Initiator's initial offer wasn't published yet
         if (
           this.isInitiator &&
-          data.initiatorReady &&
-          data.answererReady &&
           (!data.offerSdp || data.offerRevision === 0) &&
           !this.isNegotiatingOffer
         ) {
@@ -539,7 +599,7 @@ export class WebRtcSessionController {
           return;
         }
 
-        // Answerer receives SDP Offer and publishes SDP Answer
+        // Answerer receives SDP Offer and immediately publishes SDP Answer
         if (
           !this.isInitiator &&
           data.offerType === 'offer' &&
@@ -590,6 +650,19 @@ export class WebRtcSessionController {
 
   private async ensureVideoSessionAndMarkReady(): Promise<void> {
     const videoSessionRef = doc(db, 'videoSessions', this.sessionId);
+    const readinessPatch = this.isInitiator
+      ? { initiatorReady: true, updatedAt: serverTimestamp() }
+      : { answererReady: true, updatedAt: serverTimestamp() };
+
+    // Fast path: videoSessions/{sessionId} is created atomically in the matchmaking batch,
+    // so updateDoc succeeds in a single round-trip without overwriting the partner's readiness flag.
+    try {
+      await updateDoc(videoSessionRef, readinessPatch);
+      return;
+    } catch {
+      // Document may not exist yet if created by a legacy session; fall back to getDoc/setDoc
+    }
+
     let snap;
     try {
       snap = await getDoc(videoSessionRef);
@@ -616,22 +689,12 @@ export class WebRtcSessionController {
         });
         return;
       } catch {
-        // Another participant may have created the document concurrently; proceed to update
+        // Another participant created the document concurrently; proceed to updateDoc
       }
     }
 
     try {
-      if (this.isInitiator) {
-        await updateDoc(videoSessionRef, {
-          initiatorReady: true,
-          updatedAt: serverTimestamp(),
-        });
-      } else {
-        await updateDoc(videoSessionRef, {
-          answererReady: true,
-          updatedAt: serverTimestamp(),
-        });
-      }
+      await updateDoc(videoSessionRef, readinessPatch);
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `videoSessions/${this.sessionId}`);
     }
@@ -656,6 +719,7 @@ export class WebRtcSessionController {
 
       const videoSessionRef = doc(db, 'videoSessions', this.sessionId);
       await updateDoc(videoSessionRef, {
+        initiatorReady: true,
         offerType: 'offer',
         offerSdp: (offer.sdp || '').slice(0, 24000),
         answerType: '',
@@ -698,6 +762,7 @@ export class WebRtcSessionController {
 
       const videoSessionRef = doc(db, 'videoSessions', this.sessionId);
       await updateDoc(videoSessionRef, {
+        answererReady: true,
         answerType: 'answer',
         answerSdp: (answer.sdp || '').slice(0, 24000),
         status: 'negotiating',

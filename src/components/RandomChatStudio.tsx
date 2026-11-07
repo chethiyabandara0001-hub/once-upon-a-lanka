@@ -5,9 +5,7 @@ import {
   Mic,
   MicOff,
   SkipForward,
-  PhoneOff,
   ShieldAlert,
-  Ban,
   Send,
   Sparkles,
   Clock,
@@ -16,6 +14,7 @@ import {
   SwitchCamera,
   Activity,
   AlertTriangle,
+  SlidersHorizontal,
 } from 'lucide-react';
 import {
   collection,
@@ -35,6 +34,7 @@ import type { AuthenticatedUser } from '../types';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import {
   INITIAL_DIAGNOSTICS_STATE,
+  prefetchIceServers,
   request360pMediaStream,
   WebRtcSessionController,
   type WebRtcDiagnosticsState,
@@ -65,8 +65,14 @@ interface MatchSessionParticipants {
   userBId: string;
 }
 
+type GenderPreference = 'any' | 'female' | 'male' | 'non_binary';
+type RegionPreference = 'any' | 'my_region';
+
 export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
   const [preferredMode, setPreferredMode] = useState<'video' | 'text'>('video');
+  const [preferredGender, setPreferredGender] = useState<GenderPreference>('any');
+  const [preferredRegion, setPreferredRegion] = useState<RegionPreference>('any');
+
   const [stage, setStage] = useState<'idle' | 'waiting' | 'matched'>('idle');
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionParticipants, setSessionParticipants] =
@@ -79,6 +85,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
   const [callStatus, setCallStatus] = useState<
     'idle' | 'waiting_partner' | 'connecting' | 'connected' | 'failed' | 'ended'
   >('idle');
+  const [hasRemoteStream, setHasRemoteStream] = useState(false);
   const [partnerVideoReady, setPartnerVideoReady] = useState(false);
   const [cameraEnabled, setCameraEnabled] = useState(true);
   const [micEnabled, setMicEnabled] = useState(true);
@@ -104,7 +111,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
   const [safetyFeedback, setSafetyFeedback] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Refs for DOM elements, MediaStreams, and Subscriptions
+  // Refs for DOM elements, MediaStreams, Preferences, and Subscriptions
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -115,9 +122,26 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
   const sessionUnsubRef = useRef<Unsubscribe | null>(null);
   const messagesUnsubRef = useRef<Unsubscribe | null>(null);
   const waitTimerRef = useRef<number | null>(null);
+  const queuePollTimerRef = useRef<number | null>(null);
+
   const currentSessionIdRef = useRef<string | null>(null);
+  const currentPartnerIdRef = useRef<string | null>(null);
+  const lastSkippedPartnerIdRef = useRef<string | null>(null);
+  const lastSkippedAtRef = useRef<number>(0);
+  const isTransitioningSessionRef = useRef<boolean>(false);
+
+  const preferredModeRef = useRef<'video' | 'text'>(preferredMode);
+  const preferredGenderRef = useRef<GenderPreference>(preferredGender);
+  const preferredRegionRef = useRef<RegionPreference>(preferredRegion);
+  const handleStartMatchingRef = useRef<
+    ((selectedMode: 'video' | 'text', keepFeedback?: boolean) => Promise<void>) | null
+  >(null);
 
   currentSessionIdRef.current = sessionId;
+  currentPartnerIdRef.current = partner?.userId || null;
+  preferredModeRef.current = preferredMode;
+  preferredGenderRef.current = preferredGender;
+  preferredRegionRef.current = preferredRegion;
 
   // Bind local stream to PIP video element
   const attachLocalVideo = useCallback((el: HTMLVideoElement | null) => {
@@ -167,28 +191,37 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
     }
   }, []);
 
-  // Tear down active WebRTC peer connection & media tracks
-  const teardownWebRtcCall = useCallback(
+  // Close only the RTCPeerConnection & remote stream while keeping local camera stream alive for fast skip
+  const closePeerConnectionKeepCamera = useCallback(
     async (markEndedInFirestore = true) => {
       if (rtcControllerRef.current) {
         const controller = rtcControllerRef.current;
         rtcControllerRef.current = null;
         await controller.stop(markEndedInFirestore);
       }
-      stopLocalMediaTracks();
       remoteStreamRef.current = null;
+      setHasRemoteStream(false);
       if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = null;
       }
-      setVideoCallActive(false);
       setCallStatus('idle');
       setPartnerVideoReady(false);
-      setDiagnostics(INITIAL_DIAGNOSTICS_STATE);
     },
-    [stopLocalMediaTracks]
+    []
   );
 
-  // Cleanup Firestore listeners
+  // Tear down active WebRTC peer connection & local hardware media tracks completely
+  const teardownWebRtcCall = useCallback(
+    async (markEndedInFirestore = true) => {
+      await closePeerConnectionKeepCamera(markEndedInFirestore);
+      stopLocalMediaTracks();
+      setVideoCallActive(false);
+      setDiagnostics(INITIAL_DIAGNOSTICS_STATE);
+    },
+    [closePeerConnectionKeepCamera, stopLocalMediaTracks]
+  );
+
+  // Cleanup Firestore listeners & timers
   const cleanupListeners = useCallback(() => {
     if (queueUnsubRef.current) {
       queueUnsubRef.current();
@@ -205,6 +238,10 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
     if (waitTimerRef.current) {
       window.clearInterval(waitTimerRef.current);
       waitTimerRef.current = null;
+    }
+    if (queuePollTimerRef.current) {
+      window.clearInterval(queuePollTimerRef.current);
+      queuePollTimerRef.current = null;
     }
   }, []);
 
@@ -237,6 +274,64 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
     };
   }, [cleanupListeners, removeOwnQueueEntry, stopLocalMediaTracks]);
 
+  // Helper to sync local MediaStream state into the WebRTC Diagnostics panel even before a peer is matched
+  const syncLocalStreamDiagnostics = useCallback(
+    (stream: MediaStream | null, currentStatusLabel?: string) => {
+      if (!stream) {
+        setDiagnostics((prev) => ({
+          ...prev,
+          localVideoTrackState: 'inactive',
+          localAudioTrackState: 'inactive',
+          outgoingResolution: '0x0',
+        }));
+        return;
+      }
+      const vTrack = stream.getVideoTracks()[0];
+      const aTrack = stream.getAudioTracks()[0];
+      const settings = vTrack?.getSettings();
+      const res =
+        settings?.width && settings?.height
+          ? `${settings.width}x${settings.height}`
+          : '640x360';
+
+      setDiagnostics((prev) => ({
+        ...prev,
+        sessionId: currentStatusLabel || prev.sessionId,
+        localVideoTrackState: vTrack
+          ? `${vTrack.readyState} (${vTrack.enabled ? 'enabled' : 'muted'})`
+          : 'none',
+        localAudioTrackState: aTrack
+          ? `${aTrack.readyState} (${aTrack.enabled ? 'enabled' : 'muted'})`
+          : 'none',
+        outgoingResolution: res,
+      }));
+    },
+    []
+  );
+
+  // Trigger automatic re-matchmaking when the remote partner skips the session
+  const handleRemotePartnerSkipped = useCallback(async () => {
+    if (isTransitioningSessionRef.current) return;
+    isTransitioningSessionRef.current = true;
+
+    if (currentPartnerIdRef.current) {
+      lastSkippedPartnerIdRef.current = currentPartnerIdRef.current;
+      lastSkippedAtRef.current = Date.now();
+    }
+
+    cleanupListeners();
+    await closePeerConnectionKeepCamera(false);
+    await removeOwnQueueEntry();
+
+    setSafetyFeedback(
+      'Partner skipped — automatically finding you a new match based on your chosen preferences...'
+    );
+
+    if (handleStartMatchingRef.current) {
+      await handleStartMatchingRef.current(preferredModeRef.current, true);
+    }
+  }, [cleanupListeners, closePeerConnectionKeepCamera, removeOwnQueueEntry]);
+
   // Start or Accept 360p WebRTC Video Call inside an active matched session
   const startWebRtcForMatchedSession = useCallback(
     async (
@@ -248,28 +343,39 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
       setCameraPermissionError(null);
       setMicPermissionError(null);
 
-      // Tear down any previous controller before starting a fresh one
+      // Tear down any previous peer connection controller while keeping active local stream if already acquired
       if (rtcControllerRef.current) {
         await rtcControllerRef.current.stop(false);
         rtcControllerRef.current = null;
       }
-      stopLocalMediaTracks();
 
-      // Request user-initiated 360p (640x360 @ 24fps) camera + audio stream
-      const mediaResult = await request360pMediaStream(selectedFacingMode);
-      if (!mediaResult.stream) {
-        setCameraPermissionError(mediaResult.cameraError);
-        setMicPermissionError(mediaResult.micError);
-        setVideoCallActive(false);
-        setCallStatus('failed');
-        setDiagnostics((prev) => ({
-          ...prev,
-          lastError: mediaResult.cameraError || mediaResult.micError || 'Media permission denied',
-        }));
-        return;
+      let stream = localStreamRef.current;
+      const hasLiveTracks =
+        stream &&
+        stream.getTracks().some((t) => t.readyState === 'live');
+
+      if (!stream || !hasLiveTracks) {
+        stopLocalMediaTracks();
+        const mediaResult = await request360pMediaStream(selectedFacingMode);
+        if (!mediaResult.stream) {
+          setCameraPermissionError(mediaResult.cameraError);
+          setMicPermissionError(mediaResult.micError);
+          setVideoCallActive(false);
+          setCallStatus('failed');
+          setDiagnostics((prev) => ({
+            ...prev,
+            sessionId: activeSessionId,
+            lastError:
+              mediaResult.cameraError ||
+              mediaResult.micError ||
+              'Media permission denied',
+          }));
+          return;
+        }
+        stream = mediaResult.stream;
+        localStreamRef.current = stream;
       }
 
-      const stream = mediaResult.stream;
       stream.getVideoTracks().forEach((t) => {
         t.enabled = cameraEnabled;
       });
@@ -277,7 +383,6 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
         t.enabled = micEnabled;
       });
 
-      localStreamRef.current = stream;
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
         localVideoRef.current.muted = true;
@@ -285,6 +390,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
       }
 
       setVideoCallActive(true);
+      syncLocalStreamDiagnostics(stream, activeSessionId);
 
       const controller = new WebRtcSessionController({
         sessionId: activeSessionId,
@@ -295,8 +401,14 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
         callbacks: {
           onRemoteStream: (remStream) => {
             remoteStreamRef.current = remStream;
+            const hasTracks = Boolean(
+              remStream && remStream.getTracks().length > 0
+            );
+            setHasRemoteStream(hasTracks);
             if (remoteVideoRef.current) {
-              remoteVideoRef.current.srcObject = remStream;
+              if (remoteVideoRef.current.srcObject !== remStream) {
+                remoteVideoRef.current.srcObject = remStream;
+              }
               if (remStream) {
                 remoteVideoRef.current.play().catch(() => {});
               }
@@ -311,8 +423,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
           onCallStatusChange: (nextStatus) => {
             setCallStatus(nextStatus);
             if (nextStatus === 'ended') {
-              stopLocalMediaTracks();
-              setVideoCallActive(false);
+              handleRemotePartnerSkipped();
             }
           },
         },
@@ -321,7 +432,15 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
       rtcControllerRef.current = controller;
       await controller.start();
     },
-    [cameraEnabled, micEnabled, facingMode, stopLocalMediaTracks, user.id]
+    [
+      cameraEnabled,
+      micEnabled,
+      facingMode,
+      handleRemotePartnerSkipped,
+      stopLocalMediaTracks,
+      syncLocalStreamDiagnostics,
+      user.id,
+    ]
   );
 
   // Subscribe to ephemeral session messages
@@ -374,6 +493,10 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
       if (sessionUnsubRef.current) {
         sessionUnsubRef.current();
       }
+      if (queuePollTimerRef.current) {
+        window.clearInterval(queuePollTimerRef.current);
+        queuePollTimerRef.current = null;
+      }
 
       let hasTriggeredInitialVideo = false;
       const sessionDocRef = doc(db, 'matchmaking_sessions', activeSessionId);
@@ -382,16 +505,16 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
         sessionDocRef,
         (snap) => {
           if (!snap.exists()) {
-            setPartnerLeft(true);
-            teardownWebRtcCall(false);
+            handleRemotePartnerSkipped();
             return;
           }
           const sData = snap.data();
           if (sData.status === 'ended') {
-            setPartnerLeft(true);
-            teardownWebRtcCall(false);
+            handleRemotePartnerSkipped();
             return;
           }
+
+          isTransitioningSessionRef.current = false;
 
           const userAId = String(sData.userAId || '');
           const userBId = String(sData.userBId || '');
@@ -409,6 +532,11 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
           });
           setPartnerLeft(false);
           setStage('matched');
+          setDiagnostics((prev) => ({
+            ...prev,
+            sessionId: activeSessionId,
+            role: isUserA ? 'initiator' : 'answerer',
+          }));
 
           if (autoStartVideo && !hasTriggeredInitialVideo && userAId && userBId) {
             hasTriggeredInitialVideo = true;
@@ -426,154 +554,361 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
 
       subscribeToSessionMessages(activeSessionId);
     },
-    [startWebRtcForMatchedSession, subscribeToSessionMessages, teardownWebRtcCall]
+    [handleRemotePartnerSkipped, startWebRtcForMatchedSession, subscribeToSessionMessages]
   );
 
-  // Join Firestore matchmaking queue in either Video+Audio or Text-Only mode
-  const handleStartMatching = async (selectedMode: 'video' | 'text') => {
-    setPreferredMode(selectedMode);
-    cleanupListeners();
-    await teardownWebRtcCall(false);
-
-    setStage('waiting');
-    setPartner(null);
-    setSessionParticipants(null);
-    setPartnerLeft(false);
-    setMessages([]);
-    setWaitingElapsed(0);
-    setSafetyFeedback(null);
-    setCameraPermissionError(null);
-    setMicPermissionError(null);
-
-    waitTimerRef.current = window.setInterval(() => {
-      setWaitingElapsed((prev) => prev + 1);
-    }, 1000);
-
-    try {
-      // 1. Fetch user's blocked list so blocked users are never paired
-      const blocksRef = collection(db, 'blocks');
-      const blocksQuery = query(blocksRef, where('blockerId', '==', user.id));
-      const blocksSnap = await getDocs(blocksQuery);
-      const blockedIds = new Set<string>();
-      blocksSnap.forEach((b) => {
-        const bData = b.data();
-        if (bData.blockedUserId) blockedIds.add(bData.blockedUserId);
-      });
-
-      // 2. Search matchmaking queue for another waiting real user
-      const queueCol = collection(db, 'matchmaking_queue');
-      const waitingQuery = query(queueCol, where('status', '==', 'waiting'));
-      const queueSnap = await getDocs(waitingQuery);
-
-      let matchedCandidate: { id: string; displayName: string; region: string } | null = null;
+  // Helper to evaluate whether a waiting queue candidate matches both users' chosen preferences
+  const findCompatibleCandidateFromDocs = useCallback(
+    (
+      queueDocs: Array<{ id: string; data: () => Record<string, unknown> }>,
+      blockedIds: Set<string>,
+      selectedMode: 'video' | 'text',
+      requireTieBreaker: boolean
+    ): { id: string; displayName: string; region: string } | null => {
       const now = Date.now();
+      const myRegion = user.profile?.region || 'Sri Lanka';
+      const myGender = user.gender || 'prefer_not_to_say';
+      const wantGender = preferredGenderRef.current;
+      const wantRegion = preferredRegionRef.current;
 
-      queueSnap.forEach((candidateDoc) => {
-        if (matchedCandidate) return;
+      const eligible: Array<{
+        id: string;
+        displayName: string;
+        region: string;
+        sameMode: boolean;
+        isRecentlySkipped: boolean;
+      }> = [];
+
+      for (const candidateDoc of queueDocs) {
         const cData = candidateDoc.data();
         const candidateUid = candidateDoc.id;
 
-        if (candidateUid === user.id) return;
-        if (blockedIds.has(candidateUid)) return;
+        if (candidateUid === user.id) continue;
+        if (blockedIds.has(candidateUid)) continue;
 
-        const candidateTime = cData.updatedAt?.toDate
-          ? cData.updatedAt.toDate().getTime()
+        const updatedAtObj = cData.updatedAt as { toDate?: () => Date } | undefined;
+        const candidateTime = updatedAtObj?.toDate
+          ? updatedAtObj.toDate().getTime()
           : now;
-        if (now - candidateTime > 5 * 60 * 1000) return;
+        if (now - candidateTime > 5 * 60 * 1000) continue;
 
-        matchedCandidate = {
+        // Avoid dual-create race during background polling between two waiting peers
+        if (requireTieBreaker && user.id > candidateUid && now - candidateTime < 3000) {
+          continue;
+        }
+
+        // Check mutual gender preferences
+        const candidateGender = String(cData.gender || '');
+        const candidateWantGender = String(cData.preferredGender || 'any');
+        if (wantGender !== 'any' && candidateGender && candidateGender !== wantGender) {
+          continue;
+        }
+        if (
+          candidateWantGender !== 'any' &&
+          myGender &&
+          myGender !== candidateWantGender
+        ) {
+          continue;
+        }
+
+        // Check mutual region preferences
+        const candidateRegion = String(cData.region || 'Sri Lanka');
+        const candidateWantRegion = String(cData.preferredRegion || 'any');
+        if (wantRegion === 'my_region' && candidateRegion !== myRegion) {
+          continue;
+        }
+        if (candidateWantRegion === 'my_region' && myRegion !== candidateRegion) {
+          continue;
+        }
+
+        const isRecentlySkipped =
+          candidateUid === lastSkippedPartnerIdRef.current &&
+          now - lastSkippedAtRef.current < 6000;
+
+        const candidateMode = String(cData.preferredMode || 'video');
+        const sameMode = candidateMode === selectedMode;
+
+        eligible.push({
           id: candidateUid,
-          displayName: cData.displayName || 'Member',
-          region: cData.region || 'Sri Lanka',
-        };
+          displayName: String(cData.displayName || 'Member'),
+          region: candidateRegion,
+          sameMode,
+          isRecentlySkipped,
+        });
+      }
+
+      // 1. Prefer candidates who were NOT just skipped and have the exact same mode preference
+      const freshSameMode = eligible.find((c) => !c.isRecentlySkipped && c.sameMode);
+      if (freshSameMode) return freshSameMode;
+
+      // 2. Otherwise prefer any candidate who was NOT just skipped
+      const freshAnyMode = eligible.find((c) => !c.isRecentlySkipped);
+      if (freshAnyMode) return freshAnyMode;
+
+      return null;
+    },
+    [user.gender, user.id, user.profile?.region]
+  );
+
+  // Atomically pair current user with a matched candidate and pre-create `/videoSessions/{sessionId}`
+  const commitMatchBatchWithCandidate = useCallback(
+    async (
+      candidate: { id: string; displayName: string; region: string },
+      selectedMode: 'video' | 'text'
+    ) => {
+      const newSessionId = `ses_${Date.now().toString(36)}_${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      const batch = writeBatch(db);
+      const myRegion = user.profile?.region || 'Sri Lanka';
+
+      // 1. Create matchmaking session (`userAId` is deterministic WebRTC Offer Initiator)
+      const sessionRef = doc(db, 'matchmaking_sessions', newSessionId);
+      batch.set(sessionRef, {
+        sessionId: newSessionId,
+        participants: [user.id, candidate.id],
+        userAId: user.id,
+        userBId: candidate.id,
+        userAName: user.displayName,
+        userBName: candidate.displayName,
+        userARegion: myRegion,
+        userBRegion: candidate.region || 'Sri Lanka',
+        status: 'active',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
       });
 
-      if (matchedCandidate) {
-        const candidate = matchedCandidate as {
-          id: string;
-          displayName: string;
-          region: string;
-        };
-        const newSessionId = `ses_${Date.now().toString(36)}_${Math.random()
-          .toString(36)
-          .slice(2, 8)}`;
-        const batch = writeBatch(db);
+      // 2. Atomically create `/videoSessions/{newSessionId}` in the same batch so neither peer ever races on setDoc()
+      const videoSessionRef = doc(db, 'videoSessions', newSessionId);
+      batch.set(videoSessionRef, {
+        sessionId: newSessionId,
+        initiatorId: user.id,
+        answererId: candidate.id,
+        status: 'waiting',
+        initiatorReady: selectedMode === 'video',
+        answererReady: false,
+        offerType: '',
+        offerSdp: '',
+        answerType: '',
+        answerSdp: '',
+        offerRevision: 0,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
 
-        // Deterministic assignment: userAId is Offer Initiator, userBId is Answerer
-        const sessionRef = doc(db, 'matchmaking_sessions', newSessionId);
-        batch.set(sessionRef, {
-          sessionId: newSessionId,
-          participants: [user.id, candidate.id],
-          userAId: user.id,
-          userBId: candidate.id,
-          userAName: user.displayName,
-          userBName: candidate.displayName,
-          userARegion: user.profile?.region || 'Sri Lanka',
-          userBRegion: candidate.region || 'Sri Lanka',
-          status: 'active',
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
+      // 3. Update candidate's queue entry to `matched`
+      const candidateQueueRef = doc(db, 'matchmaking_queue', candidate.id);
+      batch.update(candidateQueueRef, {
+        status: 'matched',
+        sessionId: newSessionId,
+        updatedAt: serverTimestamp(),
+      });
 
-        const candidateQueueRef = doc(db, 'matchmaking_queue', candidate.id);
-        batch.update(candidateQueueRef, {
-          status: 'matched',
-          sessionId: newSessionId,
-          updatedAt: serverTimestamp(),
-        });
+      // 4. Write own queue entry as `matched`
+      const ownQueueRef = doc(db, 'matchmaking_queue', user.id);
+      batch.set(ownQueueRef, {
+        userId: user.id,
+        displayName: user.displayName,
+        gender: user.gender || 'prefer_not_to_say',
+        region: myRegion,
+        preferredMode: selectedMode,
+        preferredGender: preferredGenderRef.current,
+        preferredRegion: preferredRegionRef.current,
+        status: 'matched',
+        sessionId: newSessionId,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
 
-        const ownQueueRef = doc(db, 'matchmaking_queue', user.id);
-        batch.set(ownQueueRef, {
-          userId: user.id,
-          displayName: user.displayName,
-          region: user.profile?.region || 'Sri Lanka',
-          status: 'matched',
-          sessionId: newSessionId,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
+      await batch.commit();
 
-        await batch.commit();
+      setSessionId(newSessionId);
+      subscribeToSessionState(newSessionId, user.id, selectedMode === 'video');
+    },
+    [subscribeToSessionState, user.displayName, user.gender, user.id, user.profile?.region]
+  );
 
-        setSessionId(newSessionId);
-        subscribeToSessionState(newSessionId, user.id, selectedMode === 'video');
-      } else {
-        const ownQueueRef = doc(db, 'matchmaking_queue', user.id);
-        await setDoc(ownQueueRef, {
-          userId: user.id,
-          displayName: user.displayName,
-          region: user.profile?.region || 'Sri Lanka',
-          status: 'waiting',
-          sessionId: '',
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
+  // Join Firestore matchmaking queue in either Video+Audio or Text-Only mode using chosen preferences
+  const handleStartMatching = useCallback(
+    async (selectedMode: 'video' | 'text', keepFeedback = false) => {
+      setPreferredMode(selectedMode);
+      preferredModeRef.current = selectedMode;
 
-        queueUnsubRef.current = onSnapshot(
-          ownQueueRef,
-          (snap) => {
-            if (!snap.exists()) return;
-            const qData = snap.data();
-            if (qData.status === 'matched' && qData.sessionId) {
-              setSessionId(qData.sessionId);
-              subscribeToSessionState(
-                qData.sessionId,
-                user.id,
-                selectedMode === 'video'
-              );
-            }
-          },
-          (err) => {
-            handleFirestoreError(err, OperationType.GET, `matchmaking_queue/${user.id}`);
-          }
-        );
-      }
-    } catch (err) {
+      // Pre-warm STUN/TURN configuration while entering queue so WebRTC starts in 0ms
+      prefetchIceServers();
+
       cleanupListeners();
-      setStage('idle');
-      handleFirestoreError(err, OperationType.WRITE, 'matchmaking_queue');
-    }
-  };
+      await closePeerConnectionKeepCamera(false);
+
+      setPartner(null);
+      setSessionParticipants(null);
+      setPartnerLeft(false);
+      setMessages([]);
+      setWaitingElapsed(0);
+      if (!keepFeedback) {
+        setSafetyFeedback(null);
+      }
+      setCameraPermissionError(null);
+      setMicPermissionError(null);
+
+      // If user chose Video Chat, ensure 360p camera/mic is open so local preview & diagnostics stay live
+      if (selectedMode === 'video') {
+        const existingLive =
+          localStreamRef.current &&
+          localStreamRef.current.getTracks().some((t) => t.readyState === 'live');
+        if (!existingLive) {
+          stopLocalMediaTracks();
+          const mediaRes = await request360pMediaStream(facingMode);
+          if (!mediaRes.stream) {
+            setCameraPermissionError(mediaRes.cameraError);
+            setMicPermissionError(mediaRes.micError);
+            setDiagnostics((prev) => ({
+              ...prev,
+              lastError:
+                mediaRes.cameraError ||
+                mediaRes.micError ||
+                'Camera permission denied',
+            }));
+            isTransitioningSessionRef.current = false;
+            return;
+          }
+          mediaRes.stream.getVideoTracks().forEach((t) => {
+            t.enabled = cameraEnabled;
+          });
+          mediaRes.stream.getAudioTracks().forEach((t) => {
+            t.enabled = micEnabled;
+          });
+          localStreamRef.current = mediaRes.stream;
+        }
+        setVideoCallActive(true);
+        syncLocalStreamDiagnostics(localStreamRef.current, 'searching_queue...');
+      } else {
+        stopLocalMediaTracks();
+        setVideoCallActive(false);
+        setDiagnostics({
+          ...INITIAL_DIAGNOSTICS_STATE,
+          sessionId: 'searching_queue (text)...',
+        });
+      }
+
+      setStage('waiting');
+      isTransitioningSessionRef.current = false;
+
+      waitTimerRef.current = window.setInterval(() => {
+        setWaitingElapsed((prev) => prev + 1);
+      }, 1000);
+
+      try {
+        // 1. Fetch user's blocked list so blocked users are never paired
+        const blocksRef = collection(db, 'blocks');
+        const blocksQuery = query(blocksRef, where('blockerId', '==', user.id));
+        const blocksSnap = await getDocs(blocksQuery);
+        const blockedIds = new Set<string>();
+        blocksSnap.forEach((b) => {
+          const bData = b.data();
+          if (bData.blockedUserId) blockedIds.add(String(bData.blockedUserId));
+        });
+
+        // 2. Search matchmaking queue for another waiting real user matching preferences
+        const queueCol = collection(db, 'matchmaking_queue');
+        const waitingQuery = query(queueCol, where('status', '==', 'waiting'));
+        const queueSnap = await getDocs(waitingQuery);
+
+        const matchedCandidate = findCompatibleCandidateFromDocs(
+          queueSnap.docs,
+          blockedIds,
+          selectedMode,
+          false
+        );
+
+        if (matchedCandidate) {
+          await commitMatchBatchWithCandidate(matchedCandidate, selectedMode);
+        } else {
+          const ownQueueRef = doc(db, 'matchmaking_queue', user.id);
+          await setDoc(ownQueueRef, {
+            userId: user.id,
+            displayName: user.displayName,
+            gender: user.gender || 'prefer_not_to_say',
+            region: user.profile?.region || 'Sri Lanka',
+            preferredMode: selectedMode,
+            preferredGender: preferredGenderRef.current,
+            preferredRegion: preferredRegionRef.current,
+            status: 'waiting',
+            sessionId: '',
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+
+          queueUnsubRef.current = onSnapshot(
+            ownQueueRef,
+            (snap) => {
+              if (!snap.exists()) return;
+              const qData = snap.data();
+              if (qData.status === 'matched' && qData.sessionId) {
+                if (queuePollTimerRef.current) {
+                  window.clearInterval(queuePollTimerRef.current);
+                  queuePollTimerRef.current = null;
+                }
+                setSessionId(qData.sessionId);
+                subscribeToSessionState(
+                  qData.sessionId,
+                  user.id,
+                  selectedMode === 'video'
+                );
+              }
+            },
+            (err) => {
+              handleFirestoreError(err, OperationType.GET, `matchmaking_queue/${user.id}`);
+            }
+          );
+
+          // Periodic background check while waiting so two skipped users or newly arriving compatible peers pair reliably
+          queuePollTimerRef.current = window.setInterval(async () => {
+            try {
+              const latestSnap = await getDocs(waitingQuery);
+              const candidate = findCompatibleCandidateFromDocs(
+                latestSnap.docs,
+                blockedIds,
+                selectedMode,
+                true
+              );
+              if (candidate) {
+                if (queuePollTimerRef.current) {
+                  window.clearInterval(queuePollTimerRef.current);
+                  queuePollTimerRef.current = null;
+                }
+                await commitMatchBatchWithCandidate(candidate, selectedMode);
+              }
+            } catch {
+              // Ignore transient poll errors if another peer just claimed the match
+            }
+          }, 3500);
+        }
+      } catch (err) {
+        cleanupListeners();
+        setStage('idle');
+        handleFirestoreError(err, OperationType.WRITE, 'matchmaking_queue');
+      }
+    },
+    [
+      cameraEnabled,
+      cleanupListeners,
+      closePeerConnectionKeepCamera,
+      commitMatchBatchWithCandidate,
+      facingMode,
+      findCompatibleCandidateFromDocs,
+      micEnabled,
+      stopLocalMediaTracks,
+      subscribeToSessionState,
+      syncLocalStreamDiagnostics,
+      user.displayName,
+      user.gender,
+      user.id,
+      user.profile?.region,
+    ]
+  );
+
+  handleStartMatchingRef.current = handleStartMatching;
 
   // Toggle Camera Track
   const handleToggleCamera = () => {
@@ -635,36 +970,32 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
     }
   };
 
-  // End entire chat session
-  const handleEndSession = async () => {
-    const activeId = currentSessionIdRef.current;
+  // Cancel waiting queue (only used when waiting in queue before matching)
+  const handleCancelQueue = async () => {
     cleanupListeners();
-    await teardownWebRtcCall(true);
-
+    await teardownWebRtcCall(false);
     setStage('idle');
     setPartner(null);
     setSessionParticipants(null);
     setPartnerLeft(false);
     setSessionId(null);
     setMessages([]);
-
-    if (activeId) {
-      try {
-        await updateDoc(doc(db, 'matchmaking_sessions', activeId), {
-          status: 'ended',
-          updatedAt: serverTimestamp(),
-        });
-      } catch {
-        // Ignore
-      }
-    }
     await removeOwnQueueEntry();
   };
 
-  // Skip current partner and immediately match with someone new
+  // Skip current partner and immediately match both parties with someone new based on their chosen preferences
   const handleSkipStranger = async () => {
+    if (isTransitioningSessionRef.current) return;
+    isTransitioningSessionRef.current = true;
+
     const activeId = currentSessionIdRef.current;
-    await teardownWebRtcCall(true);
+    if (currentPartnerIdRef.current) {
+      lastSkippedPartnerIdRef.current = currentPartnerIdRef.current;
+      lastSkippedAtRef.current = Date.now();
+    }
+
+    cleanupListeners();
+    await closePeerConnectionKeepCamera(true);
 
     if (activeId) {
       try {
@@ -677,7 +1008,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
       }
     }
     await removeOwnQueueEntry();
-    handleStartMatching(preferredMode);
+    await handleStartMatching(preferredModeRef.current, true);
   };
 
   // Send real-time text message during video/text call
@@ -708,32 +1039,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
     }
   };
 
-  // Block current partner & immediately terminate WebRTC call
-  const handleBlockCurrentPartner = async () => {
-    if (!partner) return;
-    setIsSubmitting(true);
-    const blockDocId = `${user.id}_${partner.userId}`;
-    const blockRef = doc(db, 'blocks', blockDocId);
-
-    try {
-      await setDoc(blockRef, {
-        id: blockDocId,
-        blockerId: user.id,
-        blockedUserId: partner.userId,
-        blockedDisplayName: partner.displayName,
-        reason: 'Blocked during live studio session',
-        createdAt: serverTimestamp(),
-      });
-      setSafetyFeedback(`${partner.displayName} has been blocked and disconnected.`);
-      await handleSkipStranger();
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `blocks/${blockDocId}`);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  // Submit safety report & immediately terminate WebRTC call
+  // Submit safety report & immediately skip to next partner
   const handleSubmitReport = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!partner) return;
@@ -791,17 +1097,6 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
             <Activity className="w-3.5 h-3.5" />
             <span>WebRTC Diagnostics</span>
           </button>
-
-          {stage !== 'idle' && (
-            <button
-              type="button"
-              onClick={handleEndSession}
-              className="px-4 py-2 rounded-full bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors shadow-sm"
-            >
-              <PhoneOff className="w-3.5 h-3.5" />
-              <span>Leave Studio</span>
-            </button>
-          )}
         </div>
       </div>
 
@@ -950,19 +1245,65 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
         {/* Left 7 Columns: Live WebRTC Video Stage */}
         <div className="lg:col-span-7 relative min-h-[460px] flex flex-col justify-between p-6 border-b lg:border-b-0 lg:border-r border-white/10 overflow-hidden">
           {stage === 'idle' && (
-            <div className="m-auto text-center max-w-md space-y-6 py-10">
+            <div className="m-auto text-center max-w-md space-y-6 py-8">
               <span className="brand-leaf mx-auto text-[#c5fa5a] text-3xl">✦</span>
               <div className="space-y-2">
                 <h3 className="font-outfit font-extrabold text-3xl text-white">
                   How would you like to meet?
                 </h3>
                 <p className="text-sm text-[#b4c0b7] leading-relaxed">
-                  Choose live 360p camera + audio calling or start with a relaxed text-only
-                  conversation. Camera access is only requested when you start video.
+                  Choose your matching preferences and start live 360p camera + audio calling
+                  or a relaxed text-only conversation.
                 </p>
               </div>
 
-              <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+              {/* Match Preferences Selector (Preserved across skips) */}
+              <div className="p-4 rounded-2xl bg-white/5 border border-white/10 text-left space-y-3">
+                <div className="flex items-center gap-1.5 text-xs font-extrabold text-[#c5fa5a]">
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                  <span>Match Preferences (kept automatically when skipping)</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-[#96a49a] mb-1">
+                      Match With
+                    </label>
+                    <select
+                      value={preferredGender}
+                      onChange={(e) =>
+                        setPreferredGender(e.target.value as GenderPreference)
+                      }
+                      className="w-full bg-[#17221c] border border-white/15 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#c5fa5a]"
+                    >
+                      <option value="any">Everyone</option>
+                      <option value="female">Women</option>
+                      <option value="male">Men</option>
+                      <option value="non_binary">Non-Binary</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-[#96a49a] mb-1">
+                      Region Filter
+                    </label>
+                    <select
+                      value={preferredRegion}
+                      onChange={(e) =>
+                        setPreferredRegion(e.target.value as RegionPreference)
+                      }
+                      className="w-full bg-[#17221c] border border-white/15 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-[#c5fa5a]"
+                    >
+                      <option value="any">All Sri Lanka</option>
+                      <option value="my_region">
+                        Same Region ({user.profile?.region || 'Sri Lanka'})
+                      </option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
                 <button
                   type="button"
                   onClick={() => handleStartMatching('video')}
@@ -984,30 +1325,96 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
           )}
 
           {stage === 'waiting' && (
-            <div className="m-auto text-center max-w-sm space-y-6 py-12">
-              <div className="relative w-16 h-16 mx-auto">
-                <div className="w-16 h-16 rounded-full border-2 border-[#c5fa5a] border-t-transparent animate-spin" />
-                <Clock className="w-6 h-6 text-[#c5fa5a] absolute inset-0 m-auto" />
+            <div className="m-auto text-center max-w-sm space-y-5 py-8">
+              <div className="relative w-14 h-14 mx-auto">
+                <div className="w-14 h-14 rounded-full border-2 border-[#c5fa5a] border-t-transparent animate-spin" />
+                <Clock className="w-5 h-5 text-[#c5fa5a] absolute inset-0 m-auto" />
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <p className="font-outfit font-extrabold text-2xl text-white">
                   Searching for someone online...
                 </p>
                 <p className="text-xs text-[#96a49a]">
-                  Waiting for another verified member in Sri Lanka ({preferredMode.toUpperCase()} MODE)
+                  Matching on your preferences ({preferredMode.toUpperCase()} ·{' '}
+                  {preferredGender === 'any' ? 'Everyone' : preferredGender} ·{' '}
+                  {preferredRegion === 'any'
+                    ? 'All Sri Lanka'
+                    : user.profile?.region || 'Same Region'}
+                  )
                 </p>
                 <div className="inline-block px-3 py-1 rounded-full bg-white/5 text-xs font-mono text-[#c5fa5a]">
                   Queue time: {waitingElapsed}s
                 </div>
               </div>
 
+              {preferredMode === 'video' && videoCallActive && (
+                <div className="space-y-3">
+                  <div className="w-52 h-32 mx-auto rounded-2xl overflow-hidden border-2 border-[#c5fa5a]/60 bg-[#17221c] relative shadow-xl">
+                    <video
+                      ref={attachLocalVideo}
+                      autoPlay
+                      playsInline
+                      muted
+                      className={`w-full h-full object-cover ${
+                        cameraEnabled ? '' : 'hidden'
+                      }`}
+                    />
+                    {!cameraEnabled && (
+                      <div className="w-full h-full flex items-center justify-center text-xs font-bold text-[#96a49a]">
+                        Camera Off
+                      </div>
+                    )}
+                    <span className="absolute top-2 right-2 px-2 py-0.5 rounded-full bg-red-600/90 text-white text-[10px] font-black inline-flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping" />
+                      <span>360p READY</span>
+                    </span>
+                    <span className="absolute bottom-1.5 left-2 text-[10px] font-bold text-[#c5fa5a] bg-black/70 px-2 py-0.5 rounded">
+                      Your 360p Preview
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleToggleCamera();
+                        syncLocalStreamDiagnostics(localStreamRef.current);
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 border border-white/20 text-xs font-bold inline-flex items-center gap-1.5"
+                    >
+                      {cameraEnabled ? (
+                        <Video className="w-3.5 h-3.5 text-[#c5fa5a]" />
+                      ) : (
+                        <VideoOff className="w-3.5 h-3.5 text-red-400" />
+                      )}
+                      <span>{cameraEnabled ? 'Camera On' : 'Camera Off'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleToggleMic();
+                        syncLocalStreamDiagnostics(localStreamRef.current);
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 border border-white/20 text-xs font-bold inline-flex items-center gap-1.5"
+                    >
+                      {micEnabled ? (
+                        <Mic className="w-3.5 h-3.5 text-[#c5fa5a]" />
+                      ) : (
+                        <MicOff className="w-3.5 h-3.5 text-red-400" />
+                      )}
+                      <span>{micEnabled ? 'Mic On' : 'Muted'}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div>
                 <button
                   type="button"
-                  onClick={handleEndSession}
+                  onClick={handleCancelQueue}
                   className="px-5 py-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-bold text-white transition-colors"
                 >
-                  Cancel Queue
+                  Change Preferences
                 </button>
               </div>
             </div>
@@ -1021,15 +1428,15 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
                   ref={attachRemoteVideo}
                   autoPlay
                   playsInline
-                  className={`w-full h-full object-cover transition-opacity duration-300 ${
-                    videoCallActive && callStatus === 'connected'
+                  className={`w-full h-full object-cover transition-opacity duration-200 ${
+                    videoCallActive && (callStatus === 'connected' || hasRemoteStream)
                       ? 'opacity-100'
                       : 'opacity-0 pointer-events-none'
                   }`}
                 />
 
                 {/* Overlay states when remote video is not yet rendering */}
-                {(!videoCallActive || callStatus !== 'connected') && (
+                {(!videoCallActive || (callStatus !== 'connected' && !hasRemoteStream)) && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center bg-[#0e1411]">
                     <div className="max-w-md space-y-4">
                       <div className="w-20 h-20 rounded-3xl bg-[#17221c] border-2 border-[#c5fa5a]/40 flex items-center justify-center mx-auto text-[#c5fa5a] shadow-xl">
@@ -1073,29 +1480,20 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
                         </div>
                       )}
 
-                      {videoCallActive && callStatus === 'waiting_partner' && !partnerLeft && (
-                        <div className="p-4 rounded-2xl bg-white/5 border border-white/10 space-y-2">
-                          <div className="w-5 h-5 rounded-full border-2 border-[#c5fa5a] border-t-transparent animate-spin mx-auto" />
-                          <p className="text-xs font-bold text-[#c5fa5a]">
-                            Waiting for {partner.displayName} to enable camera...
-                          </p>
-                          <p className="text-[11px] text-[#96a49a]">
-                            Your local 360p preview is active. Video connects automatically as soon as both cameras are ready.
-                          </p>
-                        </div>
-                      )}
-
-                      {videoCallActive && callStatus === 'connecting' && !partnerLeft && (
-                        <div className="p-4 rounded-2xl bg-white/5 border border-white/10 space-y-2">
-                          <div className="w-5 h-5 rounded-full border-2 border-[#c5fa5a] border-t-transparent animate-spin mx-auto" />
-                          <p className="text-xs font-bold text-white">
-                            Establishing encrypted peer-to-peer 360p stream...
-                          </p>
-                          <p className="text-[11px] text-[#96a49a]">
-                            Exchanging SDP & ICE candidates via Cloud Firestore
-                          </p>
-                        </div>
-                      )}
+                      {videoCallActive &&
+                        (callStatus === 'waiting_partner' || callStatus === 'connecting') &&
+                        !hasRemoteStream &&
+                        !partnerLeft && (
+                          <div className="p-4 rounded-2xl bg-white/5 border border-white/10 space-y-2">
+                            <div className="w-5 h-5 rounded-full border-2 border-[#c5fa5a] border-t-transparent animate-spin mx-auto" />
+                            <p className="text-xs font-bold text-[#c5fa5a]">
+                              Connecting 360p video with {partner.displayName}...
+                            </p>
+                            <p className="text-[11px] text-[#96a49a]">
+                              Exchanging encrypted peer-to-peer stream via Cloud Firestore
+                            </p>
+                          </div>
+                        )}
 
                       {videoCallActive && callStatus === 'failed' && !partnerLeft && (
                         <div className="p-4 rounded-2xl bg-red-950/70 border border-red-500/40 space-y-2.5">
@@ -1123,12 +1521,6 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
                           )}
                         </div>
                       )}
-
-                      {partnerLeft && (
-                        <div className="p-3 rounded-xl bg-amber-950/80 border border-amber-500/40 text-amber-200 text-xs font-bold">
-                          {partner.displayName} has left the session.
-                        </div>
-                      )}
                     </div>
                   </div>
                 )}
@@ -1136,54 +1528,8 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
                 <div className="absolute inset-0 bg-gradient-to-t from-[#101417]/90 via-transparent to-[#101417]/60 pointer-events-none" />
               </div>
 
-              {/* Top Overlay Bar */}
-              <div className="relative z-10 flex flex-wrap items-center justify-between gap-2">
-                <div className="bg-[#101417]/85 backdrop-blur-md border border-white/15 px-4 py-2 rounded-full text-xs font-bold flex items-center gap-2">
-                  <span
-                    className={`w-2 h-2 rounded-full ${
-                      callStatus === 'connected'
-                        ? 'bg-[#c5fa5a] animate-pulse'
-                        : 'bg-emerald-400'
-                    }`}
-                  />
-                  <span>
-                    {callStatus === 'connected' ? '360p Live Video' : 'Connected'}
-                  </span>
-                  <span className="text-[#96a49a]">·</span>
-                  <span>
-                    {partner.displayName} ({partner.region})
-                  </span>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  {videoCallActive && (
-                    <span className="px-3 py-1.5 rounded-full bg-red-600/90 text-white text-[11px] font-black inline-flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-white animate-ping" />
-                      <span>CAM LIVE</span>
-                    </span>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => setReportModalOpen(true)}
-                    className="px-3 py-1.5 rounded-full bg-black/65 hover:bg-black/80 border border-white/20 text-xs font-bold inline-flex items-center gap-1 transition-colors"
-                  >
-                    <ShieldAlert className="w-3.5 h-3.5 text-[#c5fa5a]" />
-                    <span>Report</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={isSubmitting}
-                    onClick={handleBlockCurrentPartner}
-                    className="px-3 py-1.5 rounded-full bg-black/65 hover:bg-red-950/80 border border-white/20 text-xs font-bold inline-flex items-center gap-1 transition-colors"
-                  >
-                    <Ban className="w-3.5 h-3.5 text-red-400" />
-                    <span>Block</span>
-                  </button>
-                </div>
-              </div>
-
               {/* Bottom Controls + Local Picture-in-Picture Preview */}
-              <div className="relative z-10 space-y-4">
+              <div className="relative z-10 mt-auto space-y-4">
                 <div className="flex items-end justify-between gap-4">
                   <div className="bg-black/60 backdrop-blur-md p-3.5 rounded-2xl border border-white/10">
                     <p className="font-outfit font-extrabold text-xl text-white">
@@ -1191,7 +1537,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
                     </p>
                     <p className="text-xs text-[#c5fa5a] font-bold mt-0.5">
                       {partner.region} ·{' '}
-                      {callStatus === 'connected'
+                      {callStatus === 'connected' || hasRemoteStream
                         ? `Live 360p (${diagnostics.outgoingResolution})`
                         : 'Text Chat Active'}
                     </p>
@@ -1221,56 +1567,19 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
                   )}
                 </div>
 
-                {/* Media & Session Action Bar */}
+                {/* Media & Session Action Bar (Report and Skip at bottom right, no End Call button) */}
                 <div className="pt-3 border-t border-white/15 flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-2">
                     {videoCallActive ? (
-                      <>
-                        <button
-                          type="button"
-                          onClick={handleToggleCamera}
-                          className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/20 text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
-                        >
-                          {cameraEnabled ? (
-                            <Video className="w-3.5 h-3.5 text-[#c5fa5a]" />
-                          ) : (
-                            <VideoOff className="w-3.5 h-3.5 text-red-400" />
-                          )}
-                          <span>{cameraEnabled ? 'Camera On' : 'Camera Off'}</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={handleToggleMic}
-                          className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/20 text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
-                        >
-                          {micEnabled ? (
-                            <Mic className="w-3.5 h-3.5 text-[#c5fa5a]" />
-                          ) : (
-                            <MicOff className="w-3.5 h-3.5 text-red-400" />
-                          )}
-                          <span>{micEnabled ? 'Mic On' : 'Muted'}</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={handleSwitchCameraFacing}
-                          title="Switch front/back camera on mobile devices"
-                          className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/20 text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
-                        >
-                          <SwitchCamera className="w-3.5 h-3.5 text-[#c5fa5a]" />
-                          <span className="hidden sm:inline">Flip</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => teardownWebRtcCall(true)}
-                          className="px-3 py-2 rounded-xl bg-red-950/70 hover:bg-red-900/80 border border-red-500/30 text-xs font-bold text-red-200 inline-flex items-center gap-1.5 transition-colors"
-                        >
-                          <VideoOff className="w-3.5 h-3.5" />
-                          <span>Stop Video</span>
-                        </button>
-                      </>
+                      <button
+                        type="button"
+                        onClick={handleSwitchCameraFacing}
+                        title="Switch front/back camera on mobile devices"
+                        className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/20 text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
+                      >
+                        <SwitchCamera className="w-3.5 h-3.5 text-[#c5fa5a]" />
+                        <span className="hidden sm:inline">Flip</span>
+                      </button>
                     ) : (
                       sessionId &&
                       sessionParticipants &&
@@ -1293,14 +1602,14 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
                     )}
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 ml-auto">
                     <button
                       type="button"
-                      onClick={handleEndSession}
-                      className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-red-900/60 text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
+                      onClick={() => setReportModalOpen(true)}
+                      className="px-3.5 py-2 rounded-xl bg-black/65 hover:bg-black/80 border border-white/20 text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
                     >
-                      <PhoneOff className="w-3.5 h-3.5" />
-                      <span>End Chat</span>
+                      <ShieldAlert className="w-3.5 h-3.5 text-[#c5fa5a]" />
+                      <span>Report</span>
                     </button>
                     <button
                       type="button"
@@ -1308,7 +1617,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({ user }) => {
                       className="px-4 py-2 rounded-xl bg-[#c5fa5a] hover:bg-[#d2ff75] text-[#14201b] text-xs font-black inline-flex items-center gap-1.5 transition-colors shadow-md"
                     >
                       <SkipForward className="w-3.5 h-3.5" />
-                      <span>Next Person ↗</span>
+                      <span>Skip</span>
                     </button>
                   </div>
                 </div>
