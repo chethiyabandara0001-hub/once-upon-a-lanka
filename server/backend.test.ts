@@ -10,6 +10,7 @@ import {
   getServerSessionSecret,
 } from './security';
 import { db } from './db';
+import { handleApiRequest } from '../cloudflare/worker';
 
 async function runBackendVerificationTests(): Promise<void> {
   console.log('Running Once Upon a Time Backend Security & Invariant Suite...');
@@ -146,6 +147,47 @@ async function runBackendVerificationTests(): Promise<void> {
   assert.ok(recordedPayment, 'Payment row must be found');
   assert.equal(recordedPayment?.gateway, 'dev_test', 'Gateway must be recorded as dev_test');
   assert.equal(recordedPayment?.amount_lkr, 0, 'Amount must be 0 LKR');
+
+  // 8. Cloudflare Worker & Pages Edge API Verification (Login + PUT /api/profile + Discover + Conversations)
+  const loginReq = new Request('https://once-upon-a-lanka.workers.dev/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'amaya@onceuponatime.lk', password: 'OnceUpon2026!' }),
+  });
+  const loginRes = await handleApiRequest(loginReq, {}, new URL(loginReq.url));
+  assert.equal(loginRes.status, 200, 'Edge login must return HTTP 200');
+  const loginData = (await loginRes.json()) as {
+    token: string;
+    user: { id: string; onboardingCompleted: boolean; counts: { activeMatches: number } };
+  };
+  assert.ok(loginData.token.startsWith('ouat_v1.'), 'Edge login must return stateless HMAC token');
+  assert.equal(loginData.user.onboardingCompleted, true, 'Seeded user must have onboardingCompleted=true');
+  assert.ok(typeof loginData.user.counts.activeMatches === 'number', 'User payload must include counts');
+
+  const profilePutReq = new Request('https://once-upon-a-lanka.workers.dev/api/profile', {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${loginData.token}`,
+    },
+    body: JSON.stringify({
+      displayName: 'Amaya',
+      bio: 'Updated bio on Cloudflare Edge',
+      onboardingCompleted: true,
+    }),
+  });
+  const profilePutRes = await handleApiRequest(profilePutReq, {}, new URL(profilePutReq.url));
+  assert.equal(profilePutRes.status, 200, 'PUT /api/profile on Cloudflare Worker must return HTTP 200');
+
+  const convoGetReq = new Request(
+    'https://once-upon-a-lanka.workers.dev/api/conversations/cnv_amaya_kavan/messages',
+    {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${loginData.token}` },
+    }
+  );
+  const convoGetRes = await handleApiRequest(convoGetReq, {}, new URL(convoGetReq.url));
+  assert.equal(convoGetRes.status, 200, 'GET /api/conversations/:id/messages must return HTTP 200');
 
   console.log('ALL BACKEND TESTS PASSED.');
 }
