@@ -208,7 +208,13 @@ export function createApiRouter(): express.Router {
   });
 
   // 1b. WebRTC ICE Servers (Free Public STUN + Optional Secure Backend TURN Credentials)
-  router.get('/webrtc/ice-servers', requireAuth, async (_req, res) => {
+  router.get('/webrtc/ice-servers', actionRateLimiter, async (req, res) => {
+    const rawBearer = extractBearerToken(req);
+    if (!rawBearer) {
+      res.status(401).json({ error: 'Authentication required to request ICE credentials.' });
+      return;
+    }
+
     const stunUrls = (
       process.env.STUN_SERVERS ||
       process.env.VITE_STUN_SERVERS ||

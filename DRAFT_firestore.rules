@@ -188,6 +188,81 @@ service cloud.firestore {
         data.createdAt is timestamp;
     }
 
+    function isValidVideoSignalingSession(data, sessionId) {
+      return data.keys().hasAll([
+          'sessionId',
+          'initiatorId',
+          'answererId',
+          'status',
+          'initiatorReady',
+          'answererReady',
+          'offerType',
+          'offerSdp',
+          'answerType',
+          'answerSdp',
+          'offerRevision',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'sessionId',
+          'initiatorId',
+          'answererId',
+          'status',
+          'initiatorReady',
+          'answererReady',
+          'offerType',
+          'offerSdp',
+          'answerType',
+          'answerSdp',
+          'offerRevision',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.sessionId is string && data.sessionId == sessionId &&
+        data.initiatorId is string && data.initiatorId.size() >= 1 && data.initiatorId.size() <= 128 &&
+        data.answererId is string && data.answererId.size() >= 1 && data.answererId.size() <= 128 &&
+        data.initiatorId != data.answererId &&
+        data.status is string && data.status in ['waiting', 'negotiating', 'connected', 'ended'] &&
+        data.initiatorReady is bool &&
+        data.answererReady is bool &&
+        data.offerType is string && data.offerType.size() <= 20 &&
+        data.offerSdp is string && data.offerSdp.size() <= 24000 &&
+        data.answerType is string && data.answerType.size() <= 20 &&
+        data.answerSdp is string && data.answerSdp.size() <= 24000 &&
+        data.offerRevision is int && data.offerRevision >= 0 && data.offerRevision <= 1000 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidIceCandidate(data, sessionId, candidateId) {
+      return data.keys().hasAll([
+          'id',
+          'sessionId',
+          'senderId',
+          'candidate',
+          'sdpMid',
+          'sdpMLineIndex',
+          'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id',
+          'sessionId',
+          'senderId',
+          'candidate',
+          'sdpMid',
+          'sdpMLineIndex',
+          'createdAt'
+        ]) &&
+        data.id is string && data.id == candidateId &&
+        data.sessionId is string && data.sessionId == sessionId &&
+        data.senderId is string && data.senderId == request.auth.uid &&
+        data.candidate is string && data.candidate.size() >= 1 && data.candidate.size() <= 2048 &&
+        data.sdpMid is string && data.sdpMid.size() <= 64 &&
+        data.sdpMLineIndex is int && data.sdpMLineIndex >= 0 && data.sdpMLineIndex <= 32 &&
+        data.createdAt is timestamp;
+    }
+
     function isValidBlock(data, blockId) {
       return data.keys().hasAll(['id', 'blockerId', 'blockedUserId', 'createdAt']) &&
         data.id is string && data.id == blockId &&
@@ -395,7 +470,120 @@ service cloud.firestore {
       }
     }
 
-    // 9. Collection Rules: /blocks/{blockId}
+    // 9. Collection Rules: /videoSessions/{sessionId} (WebRTC SDP & ICE Signaling)
+    match /videoSessions/{sessionId} {
+      allow get: if isSignedIn() && isValidId(sessionId) && (
+        resource == null ||
+        existing().initiatorId == request.auth.uid ||
+        existing().answererId == request.auth.uid
+      );
+
+      allow list: if false;
+
+      // Only authenticated participants of an active matchmaking_session can initialize its videoSession
+      allow create: if isSignedIn() &&
+        isValidId(sessionId) &&
+        isValidVideoSignalingSession(incoming(), sessionId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (incoming().initiatorId == request.auth.uid || incoming().answererId == request.auth.uid) &&
+        exists(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)) &&
+        get(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)).data.status == 'active' &&
+        get(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)).data.userAId == incoming().initiatorId &&
+        get(/databases/$(database)/documents/matchmaking_sessions/$(sessionId)).data.userBId == incoming().answererId;
+
+      allow update: if isSignedIn() &&
+        isValidId(sessionId) &&
+        isValidVideoSignalingSession(incoming(), sessionId) &&
+        existing().status != 'ended' &&
+        incoming().sessionId == existing().sessionId &&
+        incoming().initiatorId == existing().initiatorId &&
+        incoming().answererId == existing().answererId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          // Action 1: Initiator publishes readiness, SDP offer, or ICE restart offer
+          (
+            request.auth.uid == existing().initiatorId &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'initiatorReady',
+              'offerType',
+              'offerSdp',
+              'answerType',
+              'answerSdp',
+              'offerRevision',
+              'status',
+              'updatedAt'
+            ])
+          ) ||
+          // Action 2: Answerer publishes readiness or SDP answer
+          (
+            request.auth.uid == existing().answererId &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'answererReady',
+              'answerType',
+              'answerSdp',
+              'status',
+              'updatedAt'
+            ])
+          ) ||
+          // Action 3: Either participant ends the video call
+          (
+            (request.auth.uid == existing().initiatorId || request.auth.uid == existing().answererId) &&
+            incoming().status == 'ended' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+        );
+
+      allow delete: if false;
+
+      // Subcollection: Initiator ICE Candidates (Only initiator can create; both participants can read)
+      match /initiatorCandidates/{candidateId} {
+        allow get: if isSignedIn() && isValidId(sessionId) && isValidId(candidateId) && (
+          get(/databases/$(database)/documents/videoSessions/$(sessionId)).data.initiatorId == request.auth.uid ||
+          get(/databases/$(database)/documents/videoSessions/$(sessionId)).data.answererId == request.auth.uid
+        );
+
+        allow list: if isSignedIn() && (
+          get(/databases/$(database)/documents/videoSessions/$(sessionId)).data.initiatorId == request.auth.uid ||
+          get(/databases/$(database)/documents/videoSessions/$(sessionId)).data.answererId == request.auth.uid
+        );
+
+        allow create: if isSignedIn() &&
+          isValidId(sessionId) &&
+          isValidId(candidateId) &&
+          isValidIceCandidate(incoming(), sessionId, candidateId) &&
+          incoming().createdAt == request.time &&
+          get(/databases/$(database)/documents/videoSessions/$(sessionId)).data.status != 'ended' &&
+          get(/databases/$(database)/documents/videoSessions/$(sessionId)).data.initiatorId == request.auth.uid;
+
+        allow update, delete: if false;
+      }
+
+      // Subcollection: Answerer ICE Candidates (Only answerer can create; both participants can read)
+      match /answererCandidates/{candidateId} {
+        allow get: if isSignedIn() && isValidId(sessionId) && isValidId(candidateId) && (
+          get(/databases/$(database)/documents/videoSessions/$(sessionId)).data.initiatorId == request.auth.uid ||
+          get(/databases/$(database)/documents/videoSessions/$(sessionId)).data.answererId == request.auth.uid
+        );
+
+        allow list: if isSignedIn() && (
+          get(/databases/$(database)/documents/videoSessions/$(sessionId)).data.initiatorId == request.auth.uid ||
+          get(/databases/$(database)/documents/videoSessions/$(sessionId)).data.answererId == request.auth.uid
+        );
+
+        allow create: if isSignedIn() &&
+          isValidId(sessionId) &&
+          isValidId(candidateId) &&
+          isValidIceCandidate(incoming(), sessionId, candidateId) &&
+          incoming().createdAt == request.time &&
+          get(/databases/$(database)/documents/videoSessions/$(sessionId)).data.status != 'ended' &&
+          get(/databases/$(database)/documents/videoSessions/$(sessionId)).data.answererId == request.auth.uid;
+
+        allow update, delete: if false;
+      }
+    }
+
+    // 10. Collection Rules: /blocks/{blockId}
     match /blocks/{blockId} {
       allow get: if isSignedIn() && isValidBlockId(blockId) && existing().blockerId == request.auth.uid;
 
@@ -412,7 +600,7 @@ service cloud.firestore {
       allow update: if false;
     }
 
-    // 10. Collection Rules: /reports/{reportId}
+    // 11. Collection Rules: /reports/{reportId}
     match /reports/{reportId} {
       allow get: if isSignedIn() && isValidId(reportId) && existing().reporterId == request.auth.uid;
 
@@ -427,7 +615,7 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    // 11. Collection Rules: /subscriptions/{userId}
+    // 12. Collection Rules: /subscriptions/{userId}
     match /subscriptions/{userId} {
       allow get: if isSignedIn() && isValidId(userId) && isOwner(userId);
 

@@ -270,7 +270,7 @@
     },
     "MatchmakingSession": {
       "title": "MatchmakingSession",
-      "description": "A live random text session between two real authenticated users.",
+      "description": "A live random session between two real authenticated users.",
       "type": "object",
       "properties": {
         "sessionId": {
@@ -380,6 +380,145 @@
         }
       },
       "required": ["id", "sessionId", "senderId", "senderName", "text", "createdAt"]
+    },
+    "VideoSignalingSession": {
+      "title": "VideoSignalingSession",
+      "description": "WebRTC SDP signaling state scoped to an authenticated matchmaking session.",
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Matches the parent matchmaking session ID."
+        },
+        "initiatorId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Designated WebRTC offerer UID."
+        },
+        "answererId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Designated WebRTC answerer UID."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "negotiating", "connected", "ended"],
+          "description": "Signaling lifecycle state."
+        },
+        "initiatorReady": {
+          "type": "boolean",
+          "description": "Whether initiator has granted camera/mic and joined video."
+        },
+        "answererReady": {
+          "type": "boolean",
+          "description": "Whether answerer has granted camera/mic and joined video."
+        },
+        "offerType": {
+          "type": "string",
+          "maxLength": 20,
+          "description": "SDP offer type ('offer' or empty)."
+        },
+        "offerSdp": {
+          "type": "string",
+          "maxLength": 24000,
+          "description": "Raw SDP offer string."
+        },
+        "answerType": {
+          "type": "string",
+          "maxLength": 20,
+          "description": "SDP answer type ('answer' or empty)."
+        },
+        "answerSdp": {
+          "type": "string",
+          "maxLength": 24000,
+          "description": "Raw SDP answer string."
+        },
+        "offerRevision": {
+          "type": "number",
+          "description": "Monotonic counter for initial offer and ICE restarts."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "sessionId",
+        "initiatorId",
+        "answererId",
+        "status",
+        "initiatorReady",
+        "answererReady",
+        "offerType",
+        "offerSdp",
+        "answerType",
+        "answerSdp",
+        "offerRevision",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "WebRtcIceCandidate": {
+      "title": "WebRtcIceCandidate",
+      "description": "ICE candidate published by an authenticated participant during WebRTC signaling.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Unique candidate document ID."
+        },
+        "sessionId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Session ID."
+        },
+        "senderId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Participant UID who generated this candidate."
+        },
+        "candidate": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "description": "Serialized RTCIceCandidate string."
+        },
+        "sdpMid": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Media stream identification tag."
+        },
+        "sdpMLineIndex": {
+          "type": "number",
+          "description": "Zero-based m-line index in SDP."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        }
+      },
+      "required": ["id", "sessionId", "senderId", "candidate", "sdpMid", "sdpMLineIndex", "createdAt"]
     },
     "UserBlock": {
       "title": "UserBlock",
@@ -540,7 +679,7 @@
     },
     "/matchmaking_queue/{userId}": {
       "schema": { "$ref": "#/entities/MatchmakingQueueEntry" },
-      "description": "Live matchmaking queue containing real authenticated users waiting for spontaneous text chat."
+      "description": "Live matchmaking queue containing real authenticated users waiting for spontaneous video/text chat."
     },
     "/matchmaking_sessions/{sessionId}": {
       "schema": { "$ref": "#/entities/MatchmakingSession" },
@@ -549,6 +688,18 @@
     "/matchmaking_sessions/{sessionId}/messages/{messageId}": {
       "schema": { "$ref": "#/entities/SessionMessage" },
       "description": "Ephemeral real-time chat messages exchanged between participants during a matchmaking session."
+    },
+    "/videoSessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/VideoSignalingSession" },
+      "description": "Session-scoped WebRTC SDP offer/answer and readiness signaling document."
+    },
+    "/videoSessions/{sessionId}/initiatorCandidates/{candidateId}": {
+      "schema": { "$ref": "#/entities/WebRtcIceCandidate" },
+      "description": "ICE candidates generated by the designated WebRTC offer initiator."
+    },
+    "/videoSessions/{sessionId}/answererCandidates/{candidateId}": {
+      "schema": { "$ref": "#/entities/WebRtcIceCandidate" },
+      "description": "ICE candidates generated by the designated WebRTC answerer."
     },
     "/blocks/{blockId}": {
       "schema": { "$ref": "#/entities/UserBlock" },

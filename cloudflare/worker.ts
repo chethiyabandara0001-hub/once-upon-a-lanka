@@ -32,10 +32,112 @@ export interface Env {
     fetch(request: Request | string): Promise<Response>;
   };
   MATCHMAKER?: unknown;
+  STUN_SERVERS?: string;
+  VITE_STUN_SERVERS?: string;
+  TURN_KEY_ID?: string;
+  TURN_API_TOKEN?: string;
+  TURN_URLS?: string;
+  TURN_USERNAME?: string;
+  TURN_CREDENTIAL?: string;
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+
+    // Trusted server-side WebRTC ICE / Cloudflare Realtime TURN credentials endpoint
+    if (url.pathname === '/api/webrtc/ice-servers' && request.method === 'GET') {
+      const authHeader = request.headers.get('Authorization') || '';
+      if (!authHeader.startsWith('Bearer ') || authHeader.slice(7).trim().length < 5) {
+        return new Response(
+          JSON.stringify({ error: 'Authentication required to request ICE credentials.' }),
+          { status: 401, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const stunUrls = (
+        env.STUN_SERVERS ||
+        env.VITE_STUN_SERVERS ||
+        'stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302'
+      )
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      const iceServers: Array<{
+        urls: string | string[];
+        username?: string;
+        credential?: string;
+      }> = [{ urls: stunUrls }];
+
+      let turnConfigured = false;
+      let turnProvider: 'cloudflare_calls' | 'static_turn' | 'none' = 'none';
+
+      if (env.TURN_URLS && env.TURN_USERNAME && env.TURN_CREDENTIAL) {
+        iceServers.push({
+          urls: env.TURN_URLS.split(',').map((u) => u.trim()).filter(Boolean),
+          username: env.TURN_USERNAME.trim(),
+          credential: env.TURN_CREDENTIAL.trim(),
+        });
+        turnConfigured = true;
+        turnProvider = 'static_turn';
+      }
+
+      if (!turnConfigured && env.TURN_KEY_ID && env.TURN_API_TOKEN) {
+        try {
+          const cfTurnRes = await fetch(
+            `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(
+              env.TURN_KEY_ID.trim()
+            )}/credentials/generate`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${env.TURN_API_TOKEN.trim()}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ ttl: 3600 }),
+            }
+          );
+          if (cfTurnRes.ok) {
+            const cfTurnData = (await cfTurnRes.json()) as {
+              iceServers?:
+                | { urls: string | string[]; username?: string; credential?: string }
+                | Array<{ urls: string | string[]; username?: string; credential?: string }>;
+            };
+            if (cfTurnData.iceServers) {
+              const entries = Array.isArray(cfTurnData.iceServers)
+                ? cfTurnData.iceServers
+                : [cfTurnData.iceServers];
+              for (const entry of entries) {
+                if (entry && entry.urls) {
+                  iceServers.push(entry);
+                  turnConfigured = true;
+                  turnProvider = 'cloudflare_calls';
+                }
+              }
+            }
+          }
+        } catch {
+          // Fallback to STUN
+        }
+      }
+
+      return new Response(
+        JSON.stringify({
+          iceServers,
+          turnConfigured,
+          turnProvider,
+          mediaConstraints: {
+            width: 640,
+            height: 360,
+            frameRate: 24,
+            maxVideoBitrateBps: 500_000,
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
     if (env.ASSETS && typeof env.ASSETS.fetch === 'function') {
       return env.ASSETS.fetch(request);
     }
