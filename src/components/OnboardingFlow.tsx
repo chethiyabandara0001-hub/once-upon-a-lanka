@@ -154,9 +154,6 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
                 <h2 className="font-outfit font-extrabold text-2xl text-[#14201b]">
                   01. Photo, Display Name & Bio
                 </h2>
-                <p className="text-xs text-[#6d7a72] mt-1">
-                  Your date of birth and email address are kept private.
-                </p>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
@@ -181,36 +178,6 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
                 </div>
 
                 <div className="md:col-span-8 space-y-5">
-                  <div>
-                    <p className="text-xs font-bold text-[#6d7a72] mb-2">
-                      Or choose a starter portrait:
-                    </p>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                      {EDITORIAL_PORTRAIT_PRESETS.map((preset) => (
-                        <button
-                          key={preset.url}
-                          type="button"
-                          onClick={() => setAvatarUrl(preset.url)}
-                          className={`p-1.5 rounded-xl border-2 text-left transition-colors ${
-                            avatarUrl === preset.url
-                              ? 'border-[#17221c] bg-[#dff4b3]'
-                              : 'border-[#e7ebe5] bg-white'
-                          }`}
-                        >
-                          <div className="aspect-square rounded-lg overflow-hidden mb-1">
-                            <EditorialImage
-                              src={preset.url}
-                              alt={preset.label}
-                              aspectClassName="w-full h-full"
-                            />
-                          </div>
-                          <span className="text-[11px] font-bold text-[#14201b] block truncate">
-                            {preset.label}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
 
                   <div>
                     <label className="block text-xs font-extrabold mb-1.5">Display Name</label>

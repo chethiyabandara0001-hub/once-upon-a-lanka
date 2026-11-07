@@ -377,11 +377,8 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
 
   const navItems: Array<{ id: DashboardTab; label: string; icon: React.ReactNode }> = [
     { id: 'home', label: 'Home', icon: <Sparkles className="w-4 h-4" /> },
-    { id: 'discover', label: 'Discover', icon: <Compass className="w-4 h-4" /> },
     { id: 'random-chat', label: 'Video & Text', icon: <Video className="w-4 h-4" /> },
-    { id: 'matches', label: 'Matches', icon: <Heart className="w-4 h-4" /> },
     { id: 'messages', label: 'Messages', icon: <MessageSquare className="w-4 h-4" /> },
-    { id: 'profile', label: 'Profile', icon: <UserIcon className="w-4 h-4" /> },
     { id: 'settings', label: 'Settings', icon: <SettingsIcon className="w-4 h-4" /> },
   ];
 
@@ -502,138 +499,55 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setActiveTab('discover')}
+                  onClick={() => setActiveTab('messages')}
                   className="px-6 py-3.5 bg-white/10 hover:bg-white/15 border border-white/30 text-white font-extrabold text-xs rounded-[15px]"
                 >
-                  Browse Dating Profiles ({discoverProfiles.length})
+                  View Messages ({matches.length})
                 </button>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              <div className="lg:col-span-7 space-y-4">
-                <div className="flex items-center justify-between">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="p-7 rounded-[24px] bg-white border border-[#e7ebe5] space-y-4 flex flex-col justify-between">
+                <div>
+                  <div className="w-12 h-12 rounded-2xl bg-[#dff4b3] text-[#14201b] grid place-items-center text-xl font-black mb-4">
+                    ◉
+                  </div>
                   <h2 className="font-outfit font-extrabold text-2xl text-[#14201b]">
-                    People You May Like
+                    Live Video & Text Chat
                   </h2>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('discover')}
-                    className="text-xs font-extrabold text-[#467d1c] hover:underline"
-                  >
-                    See all ↗
-                  </button>
+                  <p className="text-xs text-[#6d7a72] mt-1 leading-relaxed">
+                    Instantly pair 1-on-1 with verified members across Sri Lanka. Complete control over your camera and microphone with one-click skip and report.
+                  </p>
                 </div>
-
-                {discoverProfiles.length === 0 ? (
-                  <div className="p-8 rounded-[24px] bg-white border border-[#e7ebe5] text-center space-y-3">
-                    <p className="text-sm font-bold text-[#14201b]">
-                      You have seen all current profiles in your discovery feed.
-                    </p>
-                    <button
-                      type="button"
-                      onClick={handleResetPasses}
-                      className="px-4 py-2 rounded-xl bg-[#c5fa5a] text-[#14201b] text-xs font-extrabold"
-                    >
-                      Revisit Passed Profiles
-                    </button>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    {discoverProfiles.slice(0, 2).map((prof) => (
-                      <div
-                        key={prof.userId}
-                        className="p-4 rounded-[22px] bg-white border border-[#e7ebe5] flex gap-4 items-center shadow-xs"
-                      >
-                        <div className="w-20 h-24 rounded-2xl overflow-hidden shrink-0">
-                          <EditorialImage
-                            src={prof.avatarUrl}
-                            alt={prof.displayName}
-                            aspectClassName="w-full h-full"
-                          />
-                        </div>
-                        <div className="space-y-1.5 min-w-0 flex-1">
-                          <p className="font-outfit font-extrabold text-xl text-[#14201b] truncate">
-                            {prof.displayName}, {prof.age}
-                          </p>
-                          <p className="text-xs text-[#6d7a72] truncate">
-                            {prof.region || 'Sri Lanka'} ·{' '}
-                            {INTENTION_LABELS[prof.datingIntention]}
-                          </p>
-                          <button
-                            type="button"
-                            onClick={() => setActiveTab('discover')}
-                            className="text-xs font-extrabold text-[#467d1c] hover:underline"
-                          >
-                            View Profile ↗
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('random-chat')}
+                  className="w-full py-3.5 bg-[#c5fa5a] hover:bg-[#b8f244] text-[#14201b] font-black text-xs rounded-xl"
+                >
+                  Launch Chat Studio ↗
+                </button>
               </div>
 
-              <div className="lg:col-span-5 space-y-4">
-                <div className="flex items-center justify-between">
+              <div className="p-7 rounded-[24px] bg-white border border-[#e7ebe5] space-y-4 flex flex-col justify-between">
+                <div>
+                  <div className="w-12 h-12 rounded-2xl bg-[#f0f7e3] text-[#14201b] grid place-items-center text-xl font-black mb-4">
+                    ✉
+                  </div>
                   <h2 className="font-outfit font-extrabold text-2xl text-[#14201b]">
-                    Mutual Matches ({matches.length})
+                    Messages & Conversations
                   </h2>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('matches')}
-                    className="text-xs font-extrabold text-[#467d1c] hover:underline"
-                  >
-                    Open Matches ↗
-                  </button>
+                  <p className="text-xs text-[#6d7a72] mt-1 leading-relaxed">
+                    Stay in touch with people you have connected with safely through private direct messaging.
+                  </p>
                 </div>
-
-                {matches.length === 0 ? (
-                  <div className="p-8 rounded-[24px] bg-white border border-[#e7ebe5] text-center space-y-2">
-                    <p className="text-sm font-bold text-[#14201b]">No mutual matches yet.</p>
-                    <p className="text-xs text-[#6d7a72]">
-                      Like profiles in Discover to start matching and messaging.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {matches.map((m) => (
-                      <div
-                        key={m.matchId}
-                        className="p-4 rounded-[22px] bg-white border border-[#e7ebe5] flex items-center justify-between gap-4"
-                      >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div className="w-12 h-12 rounded-full overflow-hidden shrink-0">
-                            <EditorialImage
-                              src={m.partner.avatarUrl}
-                              alt={m.partner.displayName}
-                              aspectClassName="w-full h-full"
-                            />
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-sm font-extrabold text-[#14201b] truncate">
-                              {m.partner.displayName}, {m.partner.age}
-                            </p>
-                            <p className="text-xs text-[#6d7a72] truncate">
-                              {m.lastMessage ? m.lastMessage.body : 'Matched · Say hello'}
-                            </p>
-                          </div>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setActiveConversationId(m.conversationId);
-                            setActiveTab('messages');
-                          }}
-                          className="px-4 py-2 rounded-xl bg-[#c5fa5a] text-[#14201b] font-black text-xs whitespace-nowrap shrink-0"
-                        >
-                          Chat ↗
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('messages')}
+                  className="w-full py-3.5 bg-[#17221c] hover:bg-[#25362c] text-white font-extrabold text-xs rounded-xl"
+                >
+                  Open Messages ↗
+                </button>
               </div>
             </div>
           </div>
@@ -683,8 +597,11 @@ export const DashboardShell: React.FC<DashboardShellProps> = ({
             {discoverProfiles.length === 0 ? (
               <div className="p-12 rounded-[26px] bg-white border border-[#e7ebe5] text-center space-y-4 max-w-xl mx-auto">
                 <h2 className="font-outfit font-extrabold text-3xl text-[#14201b]">
-                  No more profiles match these filters.
+                  No registered profiles found.
                 </h2>
+                <p className="text-xs text-[#6d7a72]">
+                  New members will appear here as they register with their Sri Lankan NIC and enable public discovery.
+                </p>
                 <div className="flex items-center justify-center gap-3 pt-2">
                   <button
                     type="button"

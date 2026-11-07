@@ -156,7 +156,7 @@ service cloud.firestore {
     // 4. Collection Rules: /users/{userId} (Non-PII Public Profile)
     match /users/{userId} {
       allow get: if isSignedIn() && isValidId(userId) && (
-        isOwner(userId) || existing().discoverable == true
+        isOwner(userId) || (resource != null && existing().discoverable == true)
       );
 
       allow list: if isSignedIn() && existing().discoverable == true;
@@ -202,9 +202,12 @@ service cloud.firestore {
         allow get: if isSignedIn() &&
           isValidId(userId) &&
           docId == 'account' &&
-          isOwner(userId) &&
-          exists(/databases/$(database)/documents/users/$(userId)) &&
-          get(/databases/$(database)/documents/users/$(userId)).data.userId == request.auth.uid;
+          isOwner(userId) && (
+            resource == null || (
+              exists(/databases/$(database)/documents/users/$(userId)) &&
+              get(/databases/$(database)/documents/users/$(userId)).data.userId == request.auth.uid
+            )
+          );
 
         allow list: if false;
 

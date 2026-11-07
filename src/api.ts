@@ -55,64 +55,7 @@ export const STANDALONE_INTERESTS: InterestItem[] = [
   { id: 'int_cricket', slug: 'island-cricket-evenings', label_en: 'Test Cricket & Evenings', label_si: 'ක්‍රිකට්', label_ta: 'கிரிக்கெட்', category: 'Sports' },
 ];
 
-const SEEDED_DISCOVER_PROFILES: DiscoverProfileCard[] = [
-  {
-    userId: 'usr_kavan',
-    displayName: 'Kavan',
-    age: 28,
-    gender: 'male',
-    region: 'Colombo 03',
-    bio: 'Architectural designer. Interested in tropical modernism, analog film, and live jazz sessions.',
-    avatarUrl: '/src/assets/images/editorial_portrait_kavan_1793978350314.jpg',
-    datingIntention: 'meaningful_dating',
-    spokenLanguages: ['English', 'Sinhala'],
-    interests: [STANDALONE_INTERESTS[2], STANDALONE_INTERESTS[5], STANDALONE_INTERESTS[6]],
-    allowRandomVideo: true,
-    allowRandomText: true,
-  },
-  {
-    userId: 'usr_dilini',
-    displayName: 'Dilini',
-    age: 25,
-    gender: 'female',
-    region: 'Kandy',
-    bio: 'Botanist in the Central Highlands. Passionate about endemic hill flora and quiet rainy evenings.',
-    avatarUrl: '/src/assets/images/editorial_portrait_dilini_1793978350862.jpg',
-    datingIntention: 'long_term_story',
-    spokenLanguages: ['Sinhala', 'English'],
-    interests: [STANDALONE_INTERESTS[0], STANDALONE_INTERESTS[7], STANDALONE_INTERESTS[4]],
-    allowRandomVideo: true,
-    allowRandomText: true,
-  },
-  {
-    userId: 'usr_ehan',
-    displayName: 'Ehan',
-    age: 27,
-    gender: 'male',
-    region: 'Jaffna',
-    bio: 'Sound designer & record collector. Chasing monsoon recordings and old Ceylon vinyls.',
-    avatarUrl: '/src/assets/images/editorial_portrait_ehan_1793978352895.jpg',
-    datingIntention: 'new_conversations',
-    spokenLanguages: ['Tamil', 'English'],
-    interests: [STANDALONE_INTERESTS[5], STANDALONE_INTERESTS[1], STANDALONE_INTERESTS[9]],
-    allowRandomVideo: true,
-    allowRandomText: true,
-  },
-  {
-    userId: 'usr_amaya',
-    displayName: 'Amaya',
-    age: 26,
-    gender: 'female',
-    region: 'Colombo 07',
-    bio: 'Documentary archivist & tea enthusiast. Weekends spent browsing antique bookshops in Galle Fort.',
-    avatarUrl: '/src/assets/images/editorial_portrait_amaya_1793978349458.jpg',
-    datingIntention: 'meaningful_dating',
-    spokenLanguages: ['English', 'Sinhala'],
-    interests: [STANDALONE_INTERESTS[0], STANDALONE_INTERESTS[1], STANDALONE_INTERESTS[4]],
-    allowRandomVideo: true,
-    allowRandomText: true,
-  },
-];
+const SEEDED_DISCOVER_PROFILES: DiscoverProfileCard[] = [];
 
 interface LocalInteractionsState {
   matches: Array<{
@@ -205,6 +148,8 @@ export function setStoredToken(token: string | null): void {
 
 /**
  * Loads the complete AuthenticatedUser from Firestore (`/users/{uid}` + `/users/{uid}/private/account`).
+ * Checks `/users/{uid}` first so brand-new Firebase Auth users who have not yet completed
+ * NIC registration return `null` cleanly without querying subcollections on a non-existent parent.
  */
 export async function fetchAuthenticatedUserFromFirestore(
   fbUser: FirebaseUser
@@ -214,17 +159,24 @@ export async function fetchAuthenticatedUserFromFirestore(
   const privatePath = `users/${uid}/private/account`;
 
   let publicSnap;
-  let privateSnap;
   try {
-    [publicSnap, privateSnap] = await Promise.all([
-      getDoc(doc(db, 'users', uid)),
-      getDoc(doc(db, 'users', uid, 'private', 'account')),
-    ]);
+    publicSnap = await getDoc(doc(db, 'users', uid));
   } catch (err) {
     handleFirestoreError(err, OperationType.GET, publicPath);
   }
 
-  if (!publicSnap.exists() || !privateSnap.exists()) {
+  if (!publicSnap || !publicSnap.exists()) {
+    return null;
+  }
+
+  let privateSnap;
+  try {
+    privateSnap = await getDoc(doc(db, 'users', uid, 'private', 'account'));
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, privatePath);
+  }
+
+  if (!privateSnap || !privateSnap.exists()) {
     return null;
   }
 
@@ -346,7 +298,7 @@ export async function createFirestoreAccountWithUniqueNic(params: {
     handleFirestoreError(err, OperationType.GET, `nic_registry/${normalizedNic}`);
   }
 
-  if (existingNicSnap.exists()) {
+  if (existingNicSnap && existingNicSnap.exists()) {
     const existingOwner = existingNicSnap.data()?.ownerId;
     if (existingOwner !== fbUser.uid) {
       if (cleanupAuthUserOnDuplicateNic) {
@@ -442,8 +394,7 @@ export async function authenticateWithGooglePopup(registrationFields?: {
   nicNumber: string;
   preferredLanguage: LanguageCode;
 }): Promise<{ token: string; user: AuthenticatedUser }> {
-  const credential = await signInWithPopup(auth, googleProvider);
-  const fbUser = credential.user;
+  const fbUser = auth.currentUser || (await signInWithPopup(auth, googleProvider)).user;
 
   const existingProfile = await fetchAuthenticatedUserFromFirestore(fbUser);
   if (existingProfile) {
@@ -451,11 +402,18 @@ export async function authenticateWithGooglePopup(registrationFields?: {
     return { token: fbUser.uid, user: existingProfile };
   }
 
-  if (!registrationFields || !registrationFields.nicNumber) {
-    await signOut(auth);
-    throw new Error(
-      'No account found for this Google email yet. Please switch to "Sign up", enter your Full Name, Date of Birth, Gender, and Sri Lankan NIC Number, and click "Sign up with Google".'
-    );
+  if (!registrationFields || !registrationFields.nicNumber.trim()) {
+    const err = new Error(
+      'Google account authenticated! Please enter your Sri Lankan NIC Number, Full Name, Date of Birth (18+), and Gender to finish creating your account.'
+    ) as Error & {
+      code?: string;
+      googleDisplayName?: string;
+      googleEmail?: string;
+    };
+    err.code = 'GOOGLE_NEEDS_NIC_REGISTRATION';
+    err.googleDisplayName = fbUser.displayName || '';
+    err.googleEmail = fbUser.email || '';
+    throw err;
   }
 
   const created = await createFirestoreAccountWithUniqueNic({
@@ -529,7 +487,7 @@ export async function apiRequest<T>(
       const user = await fetchAuthenticatedUserFromFirestore(credential.user);
       if (!user) {
         throw new Error(
-          'Your account record was not found in Firestore. Please register with your Sri Lankan NIC number.'
+          'Your account record was not found in Firestore. Please complete registration with your Sri Lankan NIC number.'
         );
       }
       setStoredToken(credential.user.uid);
@@ -538,7 +496,7 @@ export async function apiRequest<T>(
       const code = (err as { code?: string })?.code || '';
       if (code === 'auth/operation-not-allowed') {
         throw new Error(
-          'FIREBASE_EMAIL_PROVIDER_DISABLED: Email/Password sign-in is not enabled yet in your Firebase Console. Enable Email/Password in Firebase Console > Authentication > Sign-in method, or use "Continue with Google" below.'
+          'Email/Password sign-in is not enabled yet in your Firebase Console. Please click "Continue with Google" below, or enable Email/Password in Firebase Console > Authentication > Sign-in method.'
         );
       }
       if (
@@ -571,9 +529,6 @@ export async function apiRequest<T>(
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       throw new Error('Please enter a valid email address.');
     }
-    if (password.length < 8) {
-      throw new Error('Password must be at least 8 characters long.');
-    }
     if (!dateOfBirth) {
       throw new Error('Date of birth is required (18+ only).');
     }
@@ -588,33 +543,43 @@ export async function apiRequest<T>(
       throw new Error(nicCheck.error || 'Please enter a valid Sri Lankan NIC number.');
     }
 
-    let fbUser: FirebaseUser;
-    try {
-      const credential = await createUserWithEmailAndPassword(auth, email, password);
-      fbUser = credential.user;
-    } catch (err) {
-      const code = (err as { code?: string })?.code || '';
-      if (code === 'auth/operation-not-allowed') {
-        throw new Error(
-          'FIREBASE_EMAIL_PROVIDER_DISABLED: Email/Password sign-up is not enabled yet in your Firebase Console. Enable Email/Password in Firebase Console > Authentication > Sign-in method, or click "Sign up with Google" below (which will still save your Name, DOB, Gender, and unique Sri Lankan NIC to Firestore).'
-        );
+    let fbUser: FirebaseUser | null = auth.currentUser;
+    let createdNewAuthUser = false;
+
+    // If the user is not already signed in with Google (or signed in with a different email), create Email/Password account
+    if (!fbUser || (fbUser.email && fbUser.email.toLowerCase() !== email)) {
+      if (password.length < 8) {
+        throw new Error('Password must be at least 8 characters long.');
       }
-      if (code === 'auth/email-already-in-use') {
-        throw new Error('An account with this email address already exists.');
+      try {
+        const credential = await createUserWithEmailAndPassword(auth, email, password);
+        fbUser = credential.user;
+        createdNewAuthUser = true;
+      } catch (err) {
+        const code = (err as { code?: string })?.code || '';
+        if (code === 'auth/operation-not-allowed') {
+          // Automatically fall back to Google Popup if Email/Password is not enabled in Firebase Console yet
+          const googleCred = await signInWithPopup(auth, googleProvider);
+          fbUser = googleCred.user;
+          createdNewAuthUser = false;
+        } else if (code === 'auth/email-already-in-use') {
+          throw new Error('An account with this email address already exists.');
+        } else {
+          throw err;
+        }
       }
-      throw err;
     }
 
     const createdUser = await createFirestoreAccountWithUniqueNic({
       fbUser,
       name,
       displayName,
-      email,
+      email: fbUser.email || email,
       dateOfBirth,
       gender,
       nicNumber: nicCheck.normalized,
       preferredLanguage,
-      cleanupAuthUserOnDuplicateNic: true,
+      cleanupAuthUserOnDuplicateNic: createdNewAuthUser,
     });
 
     setStoredToken(fbUser.uid);
@@ -891,7 +856,20 @@ export async function apiRequest<T>(
     }
 
     if (!partnerProfile) {
-      partnerProfile = SEEDED_DISCOVER_PROFILES[0];
+      partnerProfile = {
+        userId: targetUserId,
+        displayName: 'Member',
+        age: 24,
+        gender: 'prefer_not_to_say',
+        region: 'Sri Lanka',
+        bio: '',
+        avatarUrl: '/src/assets/images/editorial_portrait_amaya_1793978349458.jpg',
+        datingIntention: 'new_conversations',
+        spokenLanguages: ['English'],
+        interests: STANDALONE_INTERESTS.slice(0, 3),
+        allowRandomVideo: true,
+        allowRandomText: true,
+      };
     }
 
     let matchRecord = interactions.matches.find(
@@ -955,7 +933,20 @@ export async function apiRequest<T>(
     const convId = convMatch[1];
     const interactions = loadInteractions();
     const matchObj = interactions.matches.find((m) => m.conversationId === convId);
-    const partner = matchObj?.partnerCard || SEEDED_DISCOVER_PROFILES[0];
+    const partner = matchObj?.partnerCard || {
+      userId: 'partner',
+      displayName: 'Member',
+      age: 24,
+      gender: 'prefer_not_to_say' as GenderType,
+      region: 'Sri Lanka',
+      bio: '',
+      avatarUrl: '/src/assets/images/editorial_portrait_amaya_1793978349458.jpg',
+      datingIntention: 'new_conversations' as DatingIntention,
+      spokenLanguages: ['English'],
+      interests: STANDALONE_INTERESTS.slice(0, 3),
+      allowRandomVideo: true,
+      allowRandomText: true,
+    };
 
     if (method === 'GET') {
       const messages = interactions.messages.filter((m) => m.conversation_id === convId);

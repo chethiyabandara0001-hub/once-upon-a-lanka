@@ -110,7 +110,24 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
       setStoredToken(res.token);
       onAuthSuccess(res.user);
     } catch (err) {
-      setError((err as Error).message);
+      const customErr = err as Error & {
+        code?: string;
+        googleDisplayName?: string;
+        googleEmail?: string;
+      };
+      if (customErr.code === 'GOOGLE_NEEDS_NIC_REGISTRATION') {
+        if (customErr.googleDisplayName && !name) {
+          setName(customErr.googleDisplayName);
+          setDisplayName(customErr.googleDisplayName.split(' ')[0] || customErr.googleDisplayName);
+        }
+        if (customErr.googleEmail && !email) {
+          setEmail(customErr.googleEmail);
+        }
+        onNavigate('register');
+        setInfoMessage(customErr.message);
+      } else {
+        setError(customErr.message);
+      }
     } finally {
       setLoading(false);
     }
