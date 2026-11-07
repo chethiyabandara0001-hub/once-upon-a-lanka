@@ -6,7 +6,6 @@ export const TRANSLATIONS: Record<
     navDiscover: string;
     navHowItWorks: string;
     navFeatures: string;
-    navMembership: string;
     navSafety: string;
     login: string;
     createAccount: string;
@@ -16,15 +15,12 @@ export const TRANSLATIONS: Record<
     ctaExploreHow: string;
     tagline: string;
     adultsOnlyNotice: string;
-    membershipTitle: string;
-    membershipPrice: string;
   }
 > = {
   en: {
     navDiscover: 'Discover',
     navHowItWorks: 'How It Works',
     navFeatures: 'Features',
-    navMembership: 'Membership',
     navSafety: 'Safety',
     login: 'Log In',
     createAccount: 'Create Account',
@@ -35,14 +31,11 @@ export const TRANSLATIONS: Record<
     ctaExploreHow: 'Explore How It Works',
     tagline: 'Every connection has a story.',
     adultsOnlyNotice: 'Sri Lanka · Adults 18+ Only · English · සිංහල · தமிழ்',
-    membershipTitle: 'Once Upon a Time Membership',
-    membershipPrice: 'Rs. 500 / 30 days',
   },
   si: {
     navDiscover: 'සොයාගන්න',
     navHowItWorks: 'ක්‍රියාත්මක වන ආකාරය',
     navFeatures: 'විශේෂාංග',
-    navMembership: 'සාමාජිකත්වය',
     navSafety: 'ආරක්ෂාව',
     login: 'පිවිසෙන්න',
     createAccount: 'ගිණුමක් අරඹන්න',
@@ -53,14 +46,11 @@ export const TRANSLATIONS: Record<
     ctaExploreHow: 'වැඩිදුර දැනගන්න',
     tagline: 'සෑම හමුවීමකටම කතාවක් ඇත.',
     adultsOnlyNotice: 'ශ්‍රී ලංකාව · වයස 18+ වැඩිහිටියන් සඳහා පමණි',
-    membershipTitle: 'Once Upon a Time සාමාජිකත්වය',
-    membershipPrice: 'රු. 500 / දින 30',
   },
   ta: {
     navDiscover: 'கண்டறிய',
     navHowItWorks: 'எப்படி செயல்படுகிறது',
     navFeatures: 'சிறப்பம்சங்கள்',
-    navMembership: 'உறுப்பினர்',
     navSafety: 'பாதுகாப்பு',
     login: 'உள்நுழைய',
     createAccount: 'கணக்கைத் தொடங்கு',
@@ -71,8 +61,6 @@ export const TRANSLATIONS: Record<
     ctaExploreHow: 'எப்படி என்று பாருங்கள்',
     tagline: 'ஒவ்வொரு உறவுக்கும் ஒரு கதை உண்டு.',
     adultsOnlyNotice: 'இலங்கை · 18+ வயது வந்தவர்களுக்கு மட்டும்',
-    membershipTitle: 'Once Upon a Time உறுப்பினர் திட்டம்',
-    membershipPrice: 'ரூ. 500 / 30 நாட்கள்',
   },
 };
 

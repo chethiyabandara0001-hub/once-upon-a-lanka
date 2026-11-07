@@ -4,13 +4,19 @@
  */
 
 import React, { useEffect, useState } from 'react';
+import { onAuthStateChanged } from 'firebase/auth';
 import type {
   AuthenticatedUser,
   InterestItem,
   LanguageCode,
   PublicRoute,
 } from './types';
-import { apiRequest, getStoredToken, setStoredToken } from './api';
+import { auth } from './firebase';
+import {
+  apiRequest,
+  fetchAuthenticatedUserFromFirestore,
+  setStoredToken,
+} from './api';
 import { LandingPage } from './components/LandingPage';
 import { AuthViews } from './components/AuthViews';
 import { OnboardingFlow } from './components/OnboardingFlow';
@@ -26,38 +32,44 @@ export default function App() {
   useEffect(() => {
     let mounted = true;
 
-    async function bootstrap() {
-      try {
-        const interestsRes = await apiRequest<{ interests: InterestItem[] }>('/interests');
+    apiRequest<{ interests: InterestItem[] }>('/interests')
+      .then((res) => {
         if (mounted) {
-          setInterestsCatalog(interestsRes.interests);
+          setInterestsCatalog(res.interests);
         }
-      } catch {
+      })
+      .catch(() => {
         // Ignore
-      }
+      });
 
-      const token = getStoredToken();
-      if (!token) {
-        if (mounted) setBootstrapping(false);
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      if (!mounted) return;
+      if (!fbUser) {
+        setStoredToken(null);
+        setCurrentUser(null);
+        setBootstrapping(false);
         return;
       }
 
       try {
-        const meRes = await apiRequest<{ user: AuthenticatedUser }>('/auth/me');
-        if (mounted) {
-          setCurrentUser(meRes.user);
-          setLanguage(meRes.user.preferredLanguage || 'en');
+        const userDoc = await fetchAuthenticatedUserFromFirestore(fbUser);
+        if (mounted && userDoc) {
+          setStoredToken(fbUser.uid);
+          setCurrentUser(userDoc);
+          setLanguage(userDoc.preferredLanguage || 'en');
         }
       } catch {
-        setStoredToken(null);
+        // If user is mid-registration, handleAuthSuccess will update currentUser once batch commits
       } finally {
-        if (mounted) setBootstrapping(false);
+        if (mounted) {
+          setBootstrapping(false);
+        }
       }
-    }
+    });
 
-    bootstrap();
     return () => {
       mounted = false;
+      unsubscribe();
     };
   }, []);
 

@@ -1,18 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import {
-  Video,
-  VideoOff,
-  Mic,
-  MicOff,
-  SkipForward,
-  ShieldAlert,
-  Ban,
-  Send,
-  AlertCircle,
-} from 'lucide-react';
-import type { AuthenticatedUser, LanguageCode, PublicRoute } from '../types';
+import React, { useState } from 'react';
+import { AlertCircle, ShieldCheck } from 'lucide-react';
+import type { AuthenticatedUser, GenderType, LanguageCode, PublicRoute } from '../types';
 import { TRANSLATIONS } from '../i18n';
-import { apiRequest, setStoredToken } from '../api';
+import { apiRequest, authenticateWithGooglePopup, setStoredToken } from '../api';
 import { EditorialImage } from './EditorialImage';
 
 interface LandingPageProps {
@@ -22,125 +12,26 @@ interface LandingPageProps {
   onAuthSuccess: (user: AuthenticatedUser) => void;
 }
 
-interface DemoPartner {
-  id: string;
-  name: string;
-  age: number;
-  region: string;
-  intention: string;
-  languages: string;
-  sharedInterests: string[];
-  portrait: string;
-  openingLine: string;
-  replyLine: string;
-}
-
-const DEMO_PARTNERS: DemoPartner[] = [
-  {
-    id: 'demo_amaya',
-    name: 'Amaya',
-    age: 26,
-    region: 'Galle & Colombo',
-    intention: 'Long-term story',
-    languages: 'English · සිංහල',
-    sharedInterests: ['Ceylon Tea & Cafés', 'Independent Cinema', 'Southern Coast Escapes'],
-    portrait: '/src/assets/images/editorial_portrait_amaya_1793978349458.jpg',
-    openingLine:
-      'Good evening from Galle Fort! The rain just cleared over the ramparts—how is Colombo tonight?',
-    replyLine: 'That sounds lovely. Nothing beats a quiet cup of tea after an evening downpour.',
-  },
-  {
-    id: 'demo_kavan',
-    name: 'Kavan',
-    age: 28,
-    region: 'Colombo 07',
-    intention: 'Meaningful dating',
-    languages: 'English · සිංහල',
-    sharedInterests: ['Tropical Architecture', 'Live Acoustic & Jazz', '35mm Film Photography'],
-    portrait: '/src/assets/images/editorial_portrait_kavan_1793978350314.jpg',
-    openingLine:
-      'Just wrapped up a studio sketch session. Are you more of a mountain hills person or southern coast?',
-    replyLine: 'Agreed—driving down the coast at dusk with good music is hard to beat.',
-  },
-  {
-    id: 'demo_dilini',
-    name: 'Dilini',
-    age: 25,
-    region: 'Kandy',
-    intention: 'Long-term story',
-    languages: 'සිංහල · English',
-    sharedInterests: ['Literature & Poetry', 'Hill Country Trails', 'Ceylon Tea & Cafés'],
-    portrait: '/src/assets/images/editorial_portrait_dilini_1793978350862.jpg',
-    openingLine:
-      'Hello from Kandy! Currently reading beside a monsoon shower. What book is on your table?',
-    replyLine: 'I have been meaning to read that next—thank you for the recommendation.',
-  },
-  {
-    id: 'demo_ehan',
-    name: 'Ehan',
-    age: 29,
-    region: 'Mirissa & Colombo',
-    intention: 'Meaningful dating',
-    languages: 'தமிழ் · English · සිංහල',
-    sharedInterests: ['Independent Cinema', '35mm Film Photography', 'Island Gastronomy'],
-    portrait: '/src/assets/images/editorial_portrait_ehan_1793978352895.jpg',
-    openingLine:
-      'Evening! Editing a short coastal film in Mirissa right now. Favourite movie you watched this year?',
-    replyLine: 'Great choice—the cinematography in that film stayed with me for weeks.',
-  },
-];
-
 export const LandingPage: React.FC<LandingPageProps> = ({
   language,
-  onLanguageChange,
   onNavigate,
   onAuthSuccess,
 }) => {
   const t = TRANSLATIONS[language];
 
-  // Built-in Auth Modal state (matching reference HTML behavior + real backend)
+  // Built-in Auth Modal state connected to Firebase Auth & Firestore
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'signup' | 'login'>('signup');
+  const [name, setName] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [dateOfBirth, setDateOfBirth] = useState('1999-05-15');
+  const [gender, setGender] = useState<GenderType>('male');
+  const [nicNumber, setNicNumber] = useState('');
   const [termsAccepted, setTermsAccepted] = useState(true);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-
-  // Interactive Demo Studio state
-  const [demoIndex, setDemoIndex] = useState(0);
-  const [demoCameraOn, setDemoCameraOn] = useState(true);
-  const [demoMicOn, setDemoMicOn] = useState(true);
-  const [demoMode, setDemoMode] = useState<'video' | 'text'>('video');
-  const [demoSafetyOpen, setDemoSafetyOpen] = useState(false);
-  const [demoSafetyFeedback, setDemoSafetyFeedback] = useState<string | null>(null);
-  const [demoInput, setDemoInput] = useState('');
-  const [demoMessages, setDemoMessages] = useState<
-    Array<{ id: string; sender: 'partner' | 'you'; text: string; time: string }>
-  >([
-    {
-      id: 'm1',
-      sender: 'partner',
-      text: DEMO_PARTNERS[0].openingLine,
-      time: '20:41',
-    },
-  ]);
-
-  const [selectedInterestFilter, setSelectedInterestFilter] = useState<string>('All');
-  const [healthInfo, setHealthInfo] = useState<{
-    paymentsConfigured?: boolean;
-    devMode?: boolean;
-  } | null>(null);
-
-  useEffect(() => {
-    apiRequest<{ paymentsConfigured: boolean; devMode: boolean }>('/health')
-      .then((res) => setHealthInfo(res))
-      .catch(() => {});
-  }, []);
-
-  const currentDemoPartner = DEMO_PARTNERS[demoIndex];
 
   const openAuthModal = (mode: 'signup' | 'login') => {
     setAuthMode(mode);
@@ -162,15 +53,20 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         setAuthModalOpen(false);
         onAuthSuccess(res.user);
       } else {
+        const cleanFullName = name.trim();
+        const cleanDisplay = displayName.trim() || cleanFullName;
         const res = await apiRequest<{ token: string; user: AuthenticatedUser }>(
           '/auth/register',
           {
             method: 'POST',
             body: JSON.stringify({
-              displayName: displayName.trim() || email.split('@')[0] || 'Member',
+              name: cleanFullName,
+              displayName: cleanDisplay,
               email,
               password,
               dateOfBirth,
+              gender,
+              nicNumber: nicNumber.trim().toUpperCase(),
               termsAccepted,
               preferredLanguage: language,
             }),
@@ -187,14 +83,22 @@ export const LandingPage: React.FC<LandingPageProps> = ({
     }
   };
 
-  const handleQuickDemoAccount = async (demoEmail: string, demoPassword: string) => {
+  const handleGoogleAuth = async () => {
     setAuthError(null);
     setAuthLoading(true);
     try {
-      const res = await apiRequest<{ token: string; user: AuthenticatedUser }>('/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email: demoEmail, password: demoPassword }),
-      });
+      const res = await authenticateWithGooglePopup(
+        authMode === 'signup'
+          ? {
+              name: name.trim(),
+              displayName: displayName.trim() || name.trim(),
+              dateOfBirth,
+              gender,
+              nicNumber: nicNumber.trim().toUpperCase(),
+              preferredLanguage: language,
+            }
+          : undefined
+      );
       setStoredToken(res.token);
       setAuthModalOpen(false);
       onAuthSuccess(res.user);
@@ -204,43 +108,6 @@ export const LandingPage: React.FC<LandingPageProps> = ({
       setAuthLoading(false);
     }
   };
-
-  const handleNextDemoPartner = () => {
-    const nextIdx = (demoIndex + 1) % DEMO_PARTNERS.length;
-    setDemoIndex(nextIdx);
-    setDemoSafetyOpen(false);
-    setDemoSafetyFeedback(null);
-    setDemoMessages([
-      {
-        id: `m_${Date.now()}`,
-        sender: 'partner',
-        text: DEMO_PARTNERS[nextIdx].openingLine,
-        time: '20:42',
-      },
-    ]);
-  };
-
-  const handleSendDemoMessage = (e: React.FormEvent) => {
-    e.preventDefault();
-    const clean = demoInput.trim();
-    if (!clean) return;
-    setDemoMessages((prev) => [
-      ...prev,
-      { id: `u_${Date.now()}`, sender: 'you', text: clean, time: '20:43' },
-      {
-        id: `p_${Date.now() + 1}`,
-        sender: 'partner',
-        text: currentDemoPartner.replyLine,
-        time: '20:43',
-      },
-    ]);
-    setDemoInput('');
-  };
-
-  const filteredProfiles =
-    selectedInterestFilter === 'All'
-      ? DEMO_PARTNERS
-      : DEMO_PARTNERS.filter((p) => p.sharedInterests.includes(selectedInterestFilter));
 
   return (
     <div className="min-h-screen bg-[#f5f6f2] text-[#14201b] flex flex-col font-sans-ui">
@@ -257,58 +124,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           </span>
         </a>
 
-        {/* Zone 2: Clean Bold Nav Links */}
-        <nav className="hidden lg:flex items-center gap-8">
-          <a
-            href="#how"
-            className="text-[#e4e8e5] hover:text-[#c5fa5a] text-sm font-bold transition-colors whitespace-nowrap shrink-0"
-          >
-            {t.navHowItWorks}
-          </a>
-          <a
-            href="#features"
-            className="text-[#e4e8e5] hover:text-[#c5fa5a] text-sm font-bold transition-colors whitespace-nowrap shrink-0"
-          >
-            {t.navFeatures}
-          </a>
-          <a
-            href="#discover-section"
-            className="text-[#e4e8e5] hover:text-[#c5fa5a] text-sm font-bold transition-colors whitespace-nowrap shrink-0"
-          >
-            {t.navDiscover}
-          </a>
-          <a
-            href="#pricing"
-            className="text-[#e4e8e5] hover:text-[#c5fa5a] text-sm font-bold transition-colors whitespace-nowrap shrink-0"
-          >
-            {t.navMembership}
-          </a>
-          <a
-            href="#safety"
-            className="text-[#e4e8e5] hover:text-[#c5fa5a] text-sm font-bold transition-colors whitespace-nowrap shrink-0"
-          >
-            {t.navSafety}
-          </a>
-        </nav>
-
-        {/* Zone 3: Language + Log in + Join now */}
+        {/* Zone 3: Log in + Join now */}
         <div className="flex items-center gap-2.5 md:gap-3 shrink-0">
-          <div className="hidden sm:flex items-center bg-white/10 border border-white/15 rounded-full p-0.5 text-xs">
-            {(['en', 'si', 'ta'] as LanguageCode[]).map((code) => (
-              <button
-                key={code}
-                type="button"
-                onClick={() => onLanguageChange(code)}
-                className={`px-2.5 py-1 rounded-full font-bold transition-colors whitespace-nowrap shrink-0 ${
-                  language === code
-                    ? 'bg-[#c5fa5a] text-[#142016]'
-                    : 'text-[#e4e8e5] hover:text-white'
-                }`}
-              >
-                {code === 'en' ? 'EN' : code === 'si' ? 'සිං' : 'தமிழ்'}
-              </button>
-            ))}
-          </div>
 
           <button
             type="button"
@@ -574,382 +391,32 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           </div>
         </section>
 
-        {/* INTERACTIVE LIVE STUDIO PREVIEW (Clearly labeled simulated demonstration) */}
-        <section className="py-16 px-6 md:px-14 lg:px-24 bg-[#e9eee5]/60">
-          <div className="max-w-[1200px] mx-auto space-y-8">
-            <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-              <div>
-                <div className="font-black text-[#557d27] text-xs tracking-[2px] uppercase">
-                  INTERACTIVE STUDIO PREVIEW · SIMULATED DEMO
-                </div>
-                <h2 className="font-outfit font-extrabold text-3xl md:text-5xl text-[#14201b] mt-2">
-                  Try the video & text controls right now.
-                </h2>
-              </div>
-              <p className="text-xs text-[#6d7a72] max-w-sm">
-                This interactive demonstration uses curated preview profiles so you can test
-                camera, mic, skip, and report controls before joining.
-              </p>
-            </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 rounded-[26px] overflow-hidden bg-[#101417] text-white shadow-[0_20px_60px_rgba(16,20,23,0.16)] border border-[#222d26]">
-              {/* Left 7 Cols: Video Stage */}
-              <div className="lg:col-span-7 relative min-h-[420px] md:min-h-[460px] flex flex-col justify-between p-6 border-b lg:border-b-0 lg:border-r border-white/10">
-                {demoMode === 'video' ? (
-                  <div className="absolute inset-0">
-                    <EditorialImage
-                      src={currentDemoPartner.portrait}
-                      alt={currentDemoPartner.name}
-                      aspectClassName="w-full h-full"
-                      className="w-full h-full object-cover"
-                    />
-                    <div className="absolute inset-0 bg-gradient-to-t from-[#101417] via-[#101417]/20 to-[#101417]/40" />
-                  </div>
-                ) : (
-                  <div className="absolute inset-0 bg-[#17221c] flex flex-col items-center justify-center p-8 text-center">
-                    <span className="brand-leaf mb-4">✦</span>
-                    <p className="font-outfit font-extrabold text-3xl text-white">
-                      Text-Only Conversation Mode
-                    </p>
-                    <p className="text-sm text-[#b4c0b7] mt-2 max-w-sm">
-                      Camera transmission is switched off—ideal for relaxed late-night chats or
-                      mobile data saver mode.
-                    </p>
-                  </div>
-                )}
-
-                <div className="relative z-10 flex items-center justify-between gap-3">
-                  <div className="bg-[#101417]/80 backdrop-blur-md border border-white/15 px-4 py-2 rounded-full text-xs font-bold">
-                    <span className="text-[#c5fa5a]">Simulated Demo</span> ·{' '}
-                    {currentDemoPartner.name}, {currentDemoPartner.age} ·{' '}
-                    {currentDemoPartner.region}
-                  </div>
-
-                  <div className="flex items-center bg-[#101417]/80 border border-white/15 rounded-full p-1 text-xs font-bold">
-                    <button
-                      type="button"
-                      onClick={() => setDemoMode('video')}
-                      className={`px-3 py-1 rounded-full transition-colors ${
-                        demoMode === 'video'
-                          ? 'bg-[#c5fa5a] text-[#14201b]'
-                          : 'text-white/80 hover:text-white'
-                      }`}
-                    >
-                      Video
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setDemoMode('text')}
-                      className={`px-3 py-1 rounded-full transition-colors ${
-                        demoMode === 'text'
-                          ? 'bg-[#c5fa5a] text-[#14201b]'
-                          : 'text-white/80 hover:text-white'
-                      }`}
-                    >
-                      Text
-                    </button>
-                  </div>
-                </div>
-
-                <div className="relative z-10 space-y-4">
-                  <div className="flex items-end justify-between gap-4">
-                    <div>
-                      <p className="font-outfit font-extrabold text-2xl text-white">
-                        {currentDemoPartner.name}, {currentDemoPartner.age}
-                      </p>
-                      <p className="text-xs text-[#bac3be]">
-                        {currentDemoPartner.region} · {currentDemoPartner.intention} ·{' '}
-                        {currentDemoPartner.languages}
-                      </p>
-                      <p className="text-xs text-[#c5fa5a] font-bold mt-1">
-                        Shared: {currentDemoPartner.sharedInterests.join(' · ')}
-                      </p>
-                    </div>
-
-                    <div className="w-28 h-20 rounded-2xl bg-[#17221c]/90 border border-white/20 flex flex-col items-center justify-center p-2 text-center shrink-0">
-                      <span className="text-[11px] font-bold text-white">
-                        {demoCameraOn ? 'Your Camera' : 'Camera Off'}
-                      </span>
-                      <span className="text-[10px] text-[#c5fa5a]">
-                        {demoMicOn ? 'Mic Active' : 'Muted'}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="pt-3 border-t border-white/15 flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setDemoCameraOn((v) => !v)}
-                        className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/20 text-xs font-bold inline-flex items-center gap-1.5"
-                      >
-                        {demoCameraOn ? (
-                          <Video className="w-3.5 h-3.5 text-[#c5fa5a]" />
-                        ) : (
-                          <VideoOff className="w-3.5 h-3.5 text-red-300" />
-                        )}
-                        <span>{demoCameraOn ? 'Camera On' : 'Camera Off'}</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setDemoMicOn((v) => !v)}
-                        className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/20 text-xs font-bold inline-flex items-center gap-1.5"
-                      >
-                        {demoMicOn ? (
-                          <Mic className="w-3.5 h-3.5 text-[#c5fa5a]" />
-                        ) : (
-                          <MicOff className="w-3.5 h-3.5 text-red-300" />
-                        )}
-                        <span>{demoMicOn ? 'Mic On' : 'Muted'}</span>
-                      </button>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setDemoSafetyOpen((v) => !v)}
-                        className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-bold inline-flex items-center gap-1.5"
-                      >
-                        <ShieldAlert className="w-3.5 h-3.5 text-[#c5fa5a]" />
-                        <span>Safety</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={handleNextDemoPartner}
-                        className="px-4 py-2 rounded-xl bg-[#c5fa5a] hover:bg-[#d2ff75] text-[#14201b] text-xs font-black inline-flex items-center gap-1.5"
-                      >
-                        <SkipForward className="w-3.5 h-3.5" />
-                        <span>Next person ↗</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Right 5 Cols: Interactive Demo Chat */}
-              <div className="lg:col-span-5 flex flex-col justify-between h-[420px] md:h-[460px] bg-[#141c18]">
-                <div className="p-4 border-b border-white/10 flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-bold text-white">
-                      Chat with {currentDemoPartner.name}
-                    </p>
-                    <p className="text-[11px] text-[#96a49a]">
-                      Simulated preview · Click Join now for live matchmaking
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => openAuthModal('signup')}
-                    className="text-xs font-extrabold text-[#c5fa5a] hover:underline"
-                  >
-                    Join live ↗
-                  </button>
-                </div>
-
-                {demoSafetyOpen ? (
-                  <div className="p-5 flex-1 space-y-3 overflow-y-auto">
-                    <p className="text-xs font-bold text-[#c5fa5a] uppercase tracking-wider">
-                      Safety Controls Preview
-                    </p>
-                    <p className="text-xs text-[#bac3be] leading-relaxed">
-                      Every live video or text chat includes instant one-click Block and Report
-                      actions.
-                    </p>
-                    {demoSafetyFeedback ? (
-                      <div className="p-3 rounded-xl bg-[#dff4b3] text-[#14201b] text-xs font-bold">
-                        {demoSafetyFeedback}
-                      </div>
-                    ) : (
-                      <div className="space-y-2">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setDemoSafetyFeedback(
-                              `Preview: ${currentDemoPartner.name} blocked and skipped immediately.`
-                            )
-                          }
-                          className="w-full p-3 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-bold text-left flex items-center justify-between"
-                        >
-                          <span>Block {currentDemoPartner.name} & Skip</span>
-                          <Ban className="w-4 h-4 text-[#c5fa5a]" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setDemoSafetyFeedback(
-                              'Preview: Safety report sent to human moderation queue.'
-                            )
-                          }
-                          className="w-full p-3 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-bold text-left flex items-center justify-between"
-                        >
-                          <span>Report Inappropriate Conduct</span>
-                          <ShieldAlert className="w-4 h-4 text-[#c5fa5a]" />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="p-5 flex-1 overflow-y-auto space-y-3">
-                    {demoMessages.map((m) => (
-                      <div
-                        key={m.id}
-                        className={`flex flex-col ${
-                          m.sender === 'you' ? 'items-end' : 'items-start'
-                        }`}
-                      >
-                        <div
-                          className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-xs leading-relaxed ${
-                            m.sender === 'you'
-                              ? 'bg-[#c5fa5a] text-[#14201b] font-bold'
-                              : 'bg-white/10 text-white'
-                          }`}
-                        >
-                          {m.text}
-                        </div>
-                        <span className="text-[10px] text-[#96a49a] mt-1 tabular-nums">
-                          {m.sender === 'you' ? 'You' : currentDemoPartner.name} · {m.time}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                <form
-                  onSubmit={handleSendDemoMessage}
-                  className="p-3.5 border-t border-white/10 flex items-center gap-2"
-                >
-                  <input
-                    type="text"
-                    value={demoInput}
-                    onChange={(e) => setDemoInput(e.target.value)}
-                    placeholder={`Say hello to ${currentDemoPartner.name}...`}
-                    className="flex-1 bg-white/10 border border-white/15 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder:text-white/50 focus:outline-none focus:border-[#c5fa5a]"
-                  />
-                  <button
-                    type="submit"
-                    className="px-4 py-2.5 bg-[#c5fa5a] text-[#14201b] rounded-xl text-xs font-black inline-flex items-center gap-1"
-                  >
-                    <Send className="w-3.5 h-3.5" />
-                    <span>Send</span>
-                  </button>
-                </form>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* DISCOVER DATING PROFILES & SHARED INTERESTS SECTION */}
-        <section id="discover-section" className="py-24 px-6 md:px-14 lg:px-24">
-          <div className="max-w-[1200px] mx-auto space-y-10">
-            <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6">
-              <div>
-                <div className="font-black text-[#557d27] text-xs tracking-[2px] uppercase">
-                  DATING PROFILES & SHARED INTERESTS
-                </div>
-                <h2
-                  className="font-outfit font-extrabold text-[#14201b] mt-2"
-                  style={{ fontSize: 'clamp(34px, 3.6vw, 52px)' }}
-                >
-                  Meet beyond your circle.
-                </h2>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                {[
-                  'All',
-                  'Ceylon Tea & Cafés',
-                  'Independent Cinema',
-                  'Tropical Architecture',
-                  'Literature & Poetry',
-                ].map((interest) => (
-                  <button
-                    key={interest}
-                    type="button"
-                    onClick={() => setSelectedInterestFilter(interest)}
-                    className={`px-4 py-2 rounded-full text-xs font-extrabold transition-colors whitespace-nowrap shrink-0 ${
-                      selectedInterestFilter === interest
-                        ? 'bg-[#17221c] text-[#c5fa5a]'
-                        : 'bg-white border border-[#dce2d9] text-[#14201b] hover:bg-[#dff4b3]'
-                    }`}
-                  >
-                    {interest}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-              {filteredProfiles.map((person) => (
-                <div
-                  key={person.id}
-                  className="rounded-[24px] overflow-hidden bg-white border border-[#e7ebe5] shadow-[0_10px_30px_rgba(20,32,27,0.05)] flex flex-col justify-between"
-                >
-                  <div className="relative aspect-[3/4]">
-                    <EditorialImage
-                      src={person.portrait}
-                      alt={person.name}
-                      aspectClassName="w-full h-full"
-                      className="w-full h-full object-cover"
-                    />
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-transparent to-transparent" />
-                    <div className="absolute bottom-4 left-4 right-4 text-white">
-                      <p className="font-outfit font-extrabold text-2xl">
-                        {person.name}, {person.age}
-                      </p>
-                      <p className="text-xs text-white/85 font-medium">
-                        {person.region} · {person.intention}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="p-5 space-y-3 flex-1 flex flex-col justify-between">
-                    <p className="text-xs text-[#6d7a72] leading-relaxed">
-                      {person.sharedInterests.join(' · ')}
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => openAuthModal('signup')}
-                      className="w-full py-2.5 rounded-xl bg-[#f0f7e3] hover:bg-[#dff4b3] text-[#14201b] text-xs font-extrabold transition-colors"
-                    >
-                      Connect with {person.name} ↗
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        {/* PRICING SECTION (Matches .pricing on #e9eee5 with .plan.featured on #17221c) */}
-        <section id="pricing" className="bg-[#e9eee5] py-24 px-6 md:px-14 lg:px-24">
+        {/* CALL TO ACTION SECTION */}
+        <section className="bg-[#e9eee5] py-24 px-6 md:px-14 lg:px-24">
           <div className="text-center max-w-[700px] mx-auto mb-11">
             <div className="font-black text-[#557d27] text-xs tracking-[2px] uppercase">
-              ONE SIMPLE MEMBERSHIP
+              START YOUR STORY
             </div>
             <h2
               className="font-outfit font-extrabold text-[#14201b] my-3.5"
               style={{ fontSize: 'clamp(39px, 4vw, 62px)' }}
             >
-              Everything for Rs. 500.
+              Ready to say hello?
             </h2>
             <p className="text-[#6d7a72] leading-[1.7] text-base">
-              One membership. All the ways to connect across Sri Lanka for 30 days—manually
-              renewed with zero automatic recurring billing traps.
+              All ways to connect across Sri Lanka—spontaneous video chat, text conversations,
+              shared interest matching, and private messaging.
             </p>
           </div>
 
           <div className="max-w-[450px] mx-auto">
             <div className="bg-[#17221c] text-white rounded-[25px] p-9 shadow-[0_20px_60px_rgba(23,34,28,0.18)]">
               <h3 className="font-outfit font-extrabold text-[26px]">
-                Once Upon a Time Membership <span className="text-[#c5fa5a]">✦</span>
+                Once Upon a Time <span className="text-[#c5fa5a]">✦</span>
               </h3>
-              <div className="font-outfit text-[46px] font-black my-5 tabular-nums">
-                Rs. 500{' '}
-                <small className="text-sm font-medium text-[#849187]">/ 30 days</small>
-              </div>
-              <ul className="pl-5 list-disc leading-[2.3] text-sm text-[#e4e8e5]">
-                <li>Random video chat (live WebRTC)</li>
+              <ul className="pl-5 list-disc leading-[2.3] text-sm text-[#e4e8e5] mt-5">
+                <li>Random video chat</li>
                 <li>Random text chat</li>
                 <li>Dating profile creation & discovery</li>
                 <li>Shared interest matching & mutual likes</li>
@@ -957,20 +424,12 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 <li>Report, block & privacy controls</li>
               </ul>
 
-              {healthInfo && !healthInfo.paymentsConfigured && (
-                <div className="mt-4 p-3 rounded-xl bg-white/10 border border-white/15 text-[11px] text-[#c5fa5a] font-medium leading-relaxed">
-                  <strong>Notice:</strong> Payments coming soon. Live PayHere checkout is disabled; full features can be explored in free development preview.
-                </div>
-              )}
-
               <button
                 type="button"
                 onClick={() => openAuthModal('signup')}
                 className="w-full mt-6 bg-[#c5fa5a] hover:bg-[#d2ff75] text-[#132014] rounded-[15px] py-4 px-6 font-black text-[15px] transition-colors"
               >
-                {healthInfo && !healthInfo.paymentsConfigured
-                  ? 'Join Free Development Preview'
-                  : 'Get membership — Rs. 500'}
+                Create free account ↗
               </button>
             </div>
           </div>
@@ -1006,15 +465,15 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         </div>
       </footer>
 
-      {/* AUTH MODAL (Exact styling of .modal in reference HTML + connected to real backend!) */}
+      {/* AUTH MODAL (Connected to Firebase Auth + Cloud Firestore NIC Registry) */}
       {authModalOpen && (
         <div
-          className="fixed inset-0 bg-[#050b08]/80 z-50 flex items-center justify-center p-5"
+          className="fixed inset-0 bg-[#050b08]/80 z-50 flex items-center justify-center p-4 overflow-y-auto"
           onClick={(e) => {
             if (e.target === e.currentTarget) setAuthModalOpen(false);
           }}
         >
-          <div className="bg-white text-[#14201b] rounded-[25px] p-8 md:p-9 w-full max-w-[440px] relative shadow-2xl">
+          <div className="bg-white text-[#14201b] rounded-[25px] p-7 md:p-8 w-full max-w-[490px] relative shadow-2xl my-6 max-h-[92vh] overflow-y-auto">
             <button
               type="button"
               onClick={() => setAuthModalOpen(false)}
@@ -1023,13 +482,13 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               ×
             </button>
 
-            <h2 className="font-outfit font-extrabold text-[32px] leading-tight mb-1.5">
+            <h2 className="font-outfit font-extrabold text-[30px] leading-tight mb-1">
               {authMode === 'signup' ? 'Join Once Upon a Time' : 'Welcome back'}
             </h2>
             <p className="text-[13px] text-[#66766c] leading-relaxed">
               {authMode === 'signup'
-                ? 'Create an adult 18+ account to start meeting new people across Sri Lanka.'
-                : 'Log in to continue your conversations and matches.'}
+                ? 'Create a verified 18+ Sri Lankan account. One National Identity Card (NIC) number can only be used for one account.'
+                : 'Log in with your registered email and password or Google account.'}
             </p>
 
             {authError && (
@@ -1039,72 +498,131 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               </div>
             )}
 
-            <form onSubmit={handleModalAuthSubmit}>
+            <form onSubmit={handleModalAuthSubmit} className="space-y-3.5 mt-4">
               {authMode === 'signup' && (
                 <>
-                  <label className="block text-xs font-extrabold mt-4 mb-1.5">Display name</label>
-                  <input
-                    type="text"
-                    required
-                    value={displayName}
-                    onChange={(e) => setDisplayName(e.target.value)}
-                    placeholder="Your name"
-                    className="w-full p-3.5 border border-[#d7ded5] rounded-[10px] text-sm focus:outline-none focus:border-[#14201b]"
-                  />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-extrabold mb-1">Full Name</label>
+                      <input
+                        type="text"
+                        required
+                        minLength={2}
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        placeholder="Kasun Jayawardena"
+                        className="w-full p-3 border border-[#d7ded5] rounded-[10px] text-sm focus:outline-none focus:border-[#14201b]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-extrabold mb-1">Display Name</label>
+                      <input
+                        type="text"
+                        required
+                        minLength={2}
+                        value={displayName}
+                        onChange={(e) => setDisplayName(e.target.value)}
+                        placeholder="Kasun"
+                        className="w-full p-3 border border-[#d7ded5] rounded-[10px] text-sm focus:outline-none focus:border-[#14201b]"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-extrabold mb-1">
+                      Sri Lankan NIC Number (1 Account Per NIC)
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={nicNumber}
+                      onChange={(e) => setNicNumber(e.target.value.toUpperCase())}
+                      placeholder="e.g., 199912345678 or 991234567V"
+                      className="w-full p-3 border border-[#d7ded5] rounded-[10px] text-sm font-mono uppercase focus:outline-none focus:border-[#14201b]"
+                    />
+                    <p className="text-[11px] text-[#557d27] font-bold mt-1 flex items-center gap-1">
+                      <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        Supports 12-digit new NIC or 9-digit + V/X old NIC. Strictly 1 NIC per
+                        account.
+                      </span>
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-extrabold mb-1">
+                        Date of Birth (18+)
+                      </label>
+                      <input
+                        type="date"
+                        required
+                        value={dateOfBirth}
+                        onChange={(e) => setDateOfBirth(e.target.value)}
+                        className="w-full p-3 border border-[#d7ded5] rounded-[10px] text-sm focus:outline-none focus:border-[#14201b]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-extrabold mb-1">Gender</label>
+                      <select
+                        value={gender}
+                        onChange={(e) => setGender(e.target.value as GenderType)}
+                        className="w-full p-3 border border-[#d7ded5] rounded-[10px] text-sm bg-white focus:outline-none focus:border-[#14201b]"
+                      >
+                        <option value="male">Male</option>
+                        <option value="female">Female</option>
+                        <option value="non_binary">Non-binary</option>
+                        <option value="prefer_not_to_say">Prefer not to say</option>
+                      </select>
+                    </div>
+                  </div>
                 </>
               )}
 
-              <label className="block text-xs font-extrabold mt-4 mb-1.5">Email address</label>
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
-                className="w-full p-3.5 border border-[#d7ded5] rounded-[10px] text-sm focus:outline-none focus:border-[#14201b]"
-              />
+              <div>
+                <label className="block text-xs font-extrabold mb-1">Email address</label>
+                <input
+                  type="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.lk"
+                  className="w-full p-3 border border-[#d7ded5] rounded-[10px] text-sm focus:outline-none focus:border-[#14201b]"
+                />
+              </div>
 
-              <label className="block text-xs font-extrabold mt-4 mb-1.5">Password</label>
-              <input
-                type="password"
-                required
-                minLength={8}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="At least 8 characters"
-                className="w-full p-3.5 border border-[#d7ded5] rounded-[10px] text-sm focus:outline-none focus:border-[#14201b]"
-              />
+              <div>
+                <label className="block text-xs font-extrabold mb-1">Password</label>
+                <input
+                  type="password"
+                  required
+                  minLength={8}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="At least 8 characters"
+                  className="w-full p-3 border border-[#d7ded5] rounded-[10px] text-sm focus:outline-none focus:border-[#14201b]"
+                />
+              </div>
 
               {authMode === 'signup' && (
-                <>
-                  <label className="block text-xs font-extrabold mt-4 mb-1.5">
-                    Date of birth (18+ required)
-                  </label>
+                <label className="flex items-center gap-2 text-xs font-medium pt-1 cursor-pointer">
                   <input
-                    type="date"
+                    type="checkbox"
                     required
-                    value={dateOfBirth}
-                    onChange={(e) => setDateOfBirth(e.target.value)}
-                    className="w-full p-3.5 border border-[#d7ded5] rounded-[10px] text-sm focus:outline-none focus:border-[#14201b]"
+                    checked={termsAccepted}
+                    onChange={(e) => setTermsAccepted(e.target.checked)}
+                    className="w-4 h-4 accent-[#14201b]"
                   />
-
-                  <label className="flex items-center gap-2 text-xs font-medium mt-4 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      required
-                      checked={termsAccepted}
-                      onChange={(e) => setTermsAccepted(e.target.checked)}
-                      className="w-4 h-4 accent-[#14201b]"
-                    />
-                    <span>I confirm I am at least 18 years old and agree to the Terms</span>
-                  </label>
-                </>
+                  <span>I confirm I am at least 18 years old and agree to the Terms</span>
+                </label>
               )}
 
               <button
                 type="submit"
                 disabled={authLoading}
-                className="w-full mt-5 bg-[#c5fa5a] hover:bg-[#b8f244] text-[#132014] rounded-[15px] py-4 font-black text-[15px] transition-colors disabled:opacity-50"
+                className="w-full mt-2 bg-[#c5fa5a] hover:bg-[#b8f244] text-[#132014] rounded-[15px] py-3.5 font-black text-[15px] transition-colors disabled:opacity-50"
               >
                 {authLoading
                   ? 'Please wait...'
@@ -1114,30 +632,22 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               </button>
             </form>
 
-            {/* Quick 1-Click Test Accounts */}
-            <div className="bg-[#eaf5d5] p-3 rounded-[11px] text-[#415b28] text-xs mt-4 space-y-2">
-              <p className="font-extrabold">Instant Demo Accounts (Real Database):</p>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleQuickDemoAccount('amaya@onceuponatime.lk', 'ColomboStory2026!')
-                  }
-                  className="px-2.5 py-1.5 rounded-lg bg-white text-[#14201b] font-bold text-[11px] shadow-xs hover:bg-[#c5fa5a]"
-                >
-                  Login as Amaya (Member)
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleQuickDemoAccount('admin@onceuponatime.lk', 'StoryAdmin2026!')
-                  }
-                  className="px-2.5 py-1.5 rounded-lg bg-[#17221c] text-white font-bold text-[11px] hover:opacity-90"
-                >
-                  Login as Nalin (Admin)
-                </button>
-              </div>
+            <div className="my-3.5 flex items-center gap-3 text-[11px] text-[#66766c] font-bold uppercase tracking-wider">
+              <div className="h-px flex-1 bg-[#e4e8e5]" />
+              <span>or</span>
+              <div className="h-px flex-1 bg-[#e4e8e5]" />
             </div>
+
+            <button
+              type="button"
+              disabled={authLoading}
+              onClick={handleGoogleAuth}
+              className="w-full border border-[#d7ded5] hover:border-[#14201b] bg-[#f8f9f6] text-[#14201b] rounded-[15px] py-3 font-extrabold text-xs transition-colors disabled:opacity-50"
+            >
+              {authMode === 'signup'
+                ? 'Sign up with Google (requires NIC & details above)'
+                : 'Continue with Google'}
+            </button>
 
             <div className="text-center mt-4 text-[13px]">
               <span>

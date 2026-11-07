@@ -1,11 +1,10 @@
 # ============================================================================
-# ONCE UPON A TIME (OUAT) — CLOUDFLARE DEPLOYMENT CONFIGURATION
+# ONCE UPON A TIME (OUAT) — CLOUDFLARE STATIC ASSETS DEPLOYMENT CONFIGURATION
 # ============================================================================
 
 name = "once-upon-a-lanka"
 main = "cloudflare/worker.ts"
 compatibility_date = "2026-03-01"
-compatibility_flags = ["nodejs_compat"]
 
 # ----------------------------------------------------------------------------
 # AUTOMATIC BUILD HOOK
@@ -18,57 +17,8 @@ command = "npm run build"
 # STATIC ASSETS CONFIGURATION
 # Serves the compiled React Vite frontend from dist/ with SPA client-side
 # routing fallback for deep-links (/login, /signup, /dashboard, /discover, etc.)
-# and worker-first routing for /api/* and /ws WebSocket requests.
 # ----------------------------------------------------------------------------
 [assets]
 directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = true
-
-[vars]
-APP_ENV = "production"
-MARKET_COUNTRY = "LK"
-CURRENCY = "LKR"
-MEMBERSHIP_PRICE_LKR = "500"
-MEMBERSHIP_DURATION_DAYS = "30"
-PAYHERE_SANDBOX = "true"
-STUN_SERVERS = "stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302"
-
-# ----------------------------------------------------------------------------
-# 1. Cloudflare D1 Database Binding (Optional)
-# ----------------------------------------------------------------------------
-# Cloudflare requires an actual database created in your Cloudflare account.
-# If database_id is a dummy/placeholder UUID, Cloudflare rejects deploy with [code: 10181].
-#
-# To enable D1:
-#   Step 1: Run `npx wrangler d1 create ouat-production-d1`
-#   Step 2: Copy the generated database_id UUID
-#   Step 3: Uncomment the [[d1_databases]] block below and paste your database_id:
-#
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "ouat-production-d1"
-# database_id = "PASTE_YOUR_CLOUDFLARE_D1_DATABASE_ID_HERE"
-# migrations_dir = "cloudflare/migrations"
-
-# ----------------------------------------------------------------------------
-# 2. Cloudflare Durable Objects (Enabled — MatchmakerDurableObject for /ws)
-# Uses SQLite-backed Durable Objects (new_sqlite_classes), supported on both
-# Cloudflare Workers Free and Paid plans.
-# ----------------------------------------------------------------------------
-[durable_objects]
-bindings = [
-  { name = "MATCHMAKER_DO", class_name = "MatchmakerDurableObject" }
-]
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["MatchmakerDurableObject"]
-
-# ----------------------------------------------------------------------------
-# 3. Cloudflare R2 Object Storage Binding (Optional)
-# ----------------------------------------------------------------------------
-# [[r2_buckets]]
-# binding = "AVATAR_BUCKET"
-# bucket_name = "ouat-profile-avatars"

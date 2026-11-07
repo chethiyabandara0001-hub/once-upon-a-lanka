@@ -1,5 +1,7 @@
 export type LanguageCode = 'en' | 'si' | 'ta';
 
+export type GenderType = 'male' | 'female' | 'non_binary' | 'prefer_not_to_say';
+
 export type DatingIntention =
   | 'long_term_story'
   | 'meaningful_dating'
@@ -27,18 +29,15 @@ export interface UserProfileData {
   allowRandomText: boolean;
 }
 
-export interface MembershipSummary {
-  planName: string;
-  priceLkr: number;
-  status: 'inactive' | 'active' | 'expired';
-  startsAt: string | null;
-  expiresAt: string | null;
-}
-
 export interface AuthenticatedUser {
   id: string;
-  email: string;
+  userId: string;
+  name: string;
   displayName: string;
+  email: string;
+  dateOfBirth: string;
+  gender: GenderType;
+  nicNumber: string;
   age: number;
   emailVerified: boolean;
   emailVerificationTokenHint: string | null;
@@ -49,7 +48,6 @@ export interface AuthenticatedUser {
   createdAt: string;
   profile: UserProfileData | null;
   interests: InterestItem[];
-  membership: MembershipSummary;
   counts: {
     activeMatches: number;
     unreadMessages: number;
@@ -60,6 +58,7 @@ export interface DiscoverProfileCard {
   userId: string;
   displayName: string;
   age: number;
+  gender?: GenderType;
   region: string;
   bio: string;
   avatarUrl: string;
@@ -97,21 +96,6 @@ export interface DirectMessageItem {
   created_at: string;
 }
 
-export interface PaymentRecord {
-  id: string;
-  order_id: string;
-  user_id: string;
-  amount_lkr: number;
-  currency: 'LKR';
-  gateway: 'payhere_live' | 'payhere_sandbox' | 'dev_test';
-  gateway_payment_id: string | null;
-  status: 'pending' | 'completed' | 'failed' | 'cancelled';
-  signature_verified: boolean;
-  raw_notification_summary: string | null;
-  created_at: string;
-  verified_at: string | null;
-}
-
 export type PublicRoute =
   | 'landing'
   | 'login'
@@ -127,7 +111,6 @@ export type DashboardTab =
   | 'random-chat'
   | 'matches'
   | 'messages'
-  | 'membership'
   | 'profile'
   | 'settings'
   | 'admin';

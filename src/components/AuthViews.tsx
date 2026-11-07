@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { ArrowLeft, CheckCircle2, AlertCircle, ShieldCheck } from 'lucide-react';
-import type { AuthenticatedUser, LanguageCode, PublicRoute } from '../types';
-import { apiRequest, setStoredToken } from '../api';
+import type { AuthenticatedUser, GenderType, LanguageCode, PublicRoute } from '../types';
+import { apiRequest, authenticateWithGooglePopup, setStoredToken } from '../api';
 import { EditorialImage } from './EditorialImage';
 
 interface AuthViewsProps {
@@ -19,10 +19,13 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
   onNavigate,
   onAuthSuccess,
 }) => {
+  const [name, setName] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [dateOfBirth, setDateOfBirth] = useState('');
+  const [dateOfBirth, setDateOfBirth] = useState('1999-05-15');
+  const [gender, setGender] = useState<GenderType>('male');
+  const [nicNumber, setNicNumber] = useState('');
   const [termsAccepted, setTermsAccepted] = useState(false);
 
   const [resetToken, setResetToken] = useState('');
@@ -58,13 +61,26 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
     }
   };
 
-  const handleQuickDemoLogin = async (demoEmail: string, demoPass: string) => {
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
     clearFeedback();
     setLoading(true);
     try {
-      const res = await apiRequest<{ token: string; user: AuthenticatedUser }>('/auth/login', {
+      const cleanFullName = name.trim();
+      const cleanDisplay = displayName.trim() || cleanFullName;
+      const res = await apiRequest<{ token: string; user: AuthenticatedUser }>('/auth/register', {
         method: 'POST',
-        body: JSON.stringify({ email: demoEmail, password: demoPass }),
+        body: JSON.stringify({
+          name: cleanFullName,
+          displayName: cleanDisplay,
+          email,
+          password,
+          dateOfBirth,
+          gender,
+          nicNumber: nicNumber.trim().toUpperCase(),
+          termsAccepted,
+          preferredLanguage: language,
+        }),
       });
       setStoredToken(res.token);
       onAuthSuccess(res.user);
@@ -75,22 +91,22 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
     }
   };
 
-  const handleRegister = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleGoogleAuth = async (isRegister: boolean) => {
     clearFeedback();
     setLoading(true);
     try {
-      const res = await apiRequest<{ token: string; user: AuthenticatedUser }>('/auth/register', {
-        method: 'POST',
-        body: JSON.stringify({
-          displayName,
-          email,
-          password,
-          dateOfBirth,
-          termsAccepted,
-          preferredLanguage: language,
-        }),
-      });
+      const res = await authenticateWithGooglePopup(
+        isRegister
+          ? {
+              name: name.trim(),
+              displayName: displayName.trim() || name.trim(),
+              dateOfBirth,
+              gender,
+              nicNumber: nicNumber.trim().toUpperCase(),
+              preferredLanguage: language,
+            }
+          : undefined
+      );
       setStoredToken(res.token);
       onAuthSuccess(res.user);
     } catch (err) {
@@ -181,7 +197,7 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
           </span>
         </div>
 
-        <span className="text-xs font-extrabold text-[#c5fa5a]">18+ ONLY</span>
+        <span className="text-xs font-extrabold text-[#c5fa5a]">18+ · NIC VERIFIED</span>
       </header>
 
       <main className="flex-1 flex items-center justify-center py-12 px-5">
@@ -206,7 +222,8 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
             </div>
 
             <p className="text-xs text-[#b4c0b7]">
-              Adults 18+ across Colombo, Kandy, Galle, Jaffna & Mirissa.
+              Adults 18+ across Colombo, Kandy, Galle, Jaffna & Mirissa · Verified by Sri Lankan
+              NIC (1 account per NIC).
             </p>
           </div>
 
@@ -283,29 +300,14 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
                   </button>
                 </form>
 
-                <div className="bg-[#eaf5d5] p-3.5 rounded-[12px] text-[#415b28] text-xs space-y-2">
-                  <p className="font-extrabold">Instant Evaluation Accounts:</p>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleQuickDemoLogin('amaya@onceuponatime.lk', 'ColomboStory2026!')
-                      }
-                      className="px-3 py-1.5 rounded-lg bg-white text-[#14201b] font-bold hover:bg-[#c5fa5a]"
-                    >
-                      Sign in as Amaya (Member)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleQuickDemoLogin('admin@onceuponatime.lk', 'StoryAdmin2026!')
-                      }
-                      className="px-3 py-1.5 rounded-lg bg-[#17221c] text-white font-bold"
-                    >
-                      Sign in as Nalin (Admin)
-                    </button>
-                  </div>
-                </div>
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={() => handleGoogleAuth(false)}
+                  className="w-full py-3.5 border border-[#d7ded5] hover:border-[#14201b] bg-[#f8f9f6] text-[#14201b] font-extrabold text-xs rounded-[15px] transition-colors"
+                >
+                  Continue with Google
+                </button>
 
                 <p className="text-xs text-center text-[#66766c]">
                   New to Once Upon a Time?{' '}
@@ -324,28 +326,88 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
             )}
 
             {route === 'register' && (
-              <div className="space-y-5">
+              <div className="space-y-4">
                 <div>
                   <h1 className="font-outfit font-extrabold text-3xl md:text-4xl text-[#14201b]">
                     Join Once Upon a Time
                   </h1>
                   <p className="text-xs text-[#66766c] mt-1">
-                    Create an adult 18+ account to start meeting new people.
+                    Create a verified adult 18+ account. Only one account is allowed per Sri Lankan
+                    NIC number.
                   </p>
                 </div>
 
-                <form onSubmit={handleRegister} className="space-y-3.5">
+                <form onSubmit={handleRegister} className="space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-extrabold mb-1">Full Name</label>
+                      <input
+                        type="text"
+                        required
+                        minLength={2}
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        placeholder="e.g., Kasun Jayawardena"
+                        className="w-full p-3 border border-[#d7ded5] rounded-[10px] text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-extrabold mb-1">Display Name</label>
+                      <input
+                        type="text"
+                        required
+                        minLength={2}
+                        value={displayName}
+                        onChange={(e) => setDisplayName(e.target.value)}
+                        placeholder="e.g., Kasun"
+                        className="w-full p-3 border border-[#d7ded5] rounded-[10px] text-sm"
+                      />
+                    </div>
+                  </div>
+
                   <div>
-                    <label className="block text-xs font-extrabold mb-1">Display name</label>
+                    <label className="block text-xs font-extrabold mb-1">
+                      Sri Lankan National Identity Card (NIC) Number
+                    </label>
                     <input
                       type="text"
                       required
-                      minLength={2}
-                      value={displayName}
-                      onChange={(e) => setDisplayName(e.target.value)}
-                      placeholder="e.g., Kasun Jayawardena"
-                      className="w-full p-3.5 border border-[#d7ded5] rounded-[10px] text-sm"
+                      value={nicNumber}
+                      onChange={(e) => setNicNumber(e.target.value.toUpperCase())}
+                      placeholder="e.g., 199912345678 or 991234567V"
+                      className="w-full p-3 border border-[#d7ded5] rounded-[10px] text-sm font-mono uppercase"
                     />
+                    <p className="text-[11px] text-[#557d27] font-bold mt-1">
+                      One NIC number can only ever be used for one account.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-extrabold mb-1">
+                        Date of birth (18+)
+                      </label>
+                      <input
+                        type="date"
+                        required
+                        value={dateOfBirth}
+                        onChange={(e) => setDateOfBirth(e.target.value)}
+                        className="w-full p-3 border border-[#d7ded5] rounded-[10px] text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-extrabold mb-1">Gender</label>
+                      <select
+                        value={gender}
+                        onChange={(e) => setGender(e.target.value as GenderType)}
+                        className="w-full p-3 border border-[#d7ded5] rounded-[10px] text-sm bg-white"
+                      >
+                        <option value="male">Male</option>
+                        <option value="female">Female</option>
+                        <option value="non_binary">Non-binary</option>
+                        <option value="prefer_not_to_say">Prefer not to say</option>
+                      </select>
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -357,34 +419,22 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
                         value={email}
                         onChange={(e) => setEmail(e.target.value)}
                         placeholder="you@example.lk"
-                        className="w-full p-3.5 border border-[#d7ded5] rounded-[10px] text-sm"
+                        className="w-full p-3 border border-[#d7ded5] rounded-[10px] text-sm"
                       />
                     </div>
-                    <div>
-                      <label className="block text-xs font-extrabold mb-1">
-                        Date of birth (18+)
-                      </label>
-                      <input
-                        type="date"
-                        required
-                        value={dateOfBirth}
-                        onChange={(e) => setDateOfBirth(e.target.value)}
-                        className="w-full p-3.5 border border-[#d7ded5] rounded-[10px] text-sm"
-                      />
-                    </div>
-                  </div>
 
-                  <div>
-                    <label className="block text-xs font-extrabold mb-1">Password</label>
-                    <input
-                      type="password"
-                      required
-                      minLength={8}
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="At least 8 characters"
-                      className="w-full p-3.5 border border-[#d7ded5] rounded-[10px] text-sm"
-                    />
+                    <div>
+                      <label className="block text-xs font-extrabold mb-1">Password</label>
+                      <input
+                        type="password"
+                        required
+                        minLength={8}
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="At least 8 characters"
+                        className="w-full p-3 border border-[#d7ded5] rounded-[10px] text-sm"
+                      />
+                    </div>
                   </div>
 
                   <label className="flex items-start gap-2 text-xs text-[#66766c] pt-1 cursor-pointer">
@@ -404,11 +454,20 @@ export const AuthViews: React.FC<AuthViewsProps> = ({
                   <button
                     type="submit"
                     disabled={loading}
-                    className="w-full py-4 bg-[#c5fa5a] hover:bg-[#b8f244] text-[#132014] font-black text-sm rounded-[15px]"
+                    className="w-full py-3.5 bg-[#c5fa5a] hover:bg-[#b8f244] text-[#132014] font-black text-sm rounded-[15px]"
                   >
                     {loading ? 'Creating account...' : 'Create account'}
                   </button>
                 </form>
+
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={() => handleGoogleAuth(true)}
+                  className="w-full py-3 border border-[#d7ded5] hover:border-[#14201b] bg-[#f8f9f6] text-[#14201b] font-extrabold text-xs rounded-[15px] transition-colors"
+                >
+                  Sign up with Google (uses NIC & details above)
+                </button>
 
                 <p className="text-xs text-center text-[#66766c]">
                   Already have an account?{' '}
