@@ -196,6 +196,7 @@ class RealtimeMatchmakingCoordinator {
     if (
       type === 'webrtc:sdp' ||
       type === 'webrtc:ice' ||
+      type === 'webrtc:ready' ||
       type === 'stranger:message' ||
       type === 'stranger:typing' ||
       type === 'stranger:media-state'

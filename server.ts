@@ -207,6 +207,96 @@ export function createApiRouter(): express.Router {
     res.json({ interests: db.state.interests });
   });
 
+  // 1b. WebRTC ICE Servers (Free Public STUN + Optional Secure Backend TURN Credentials)
+  router.get('/webrtc/ice-servers', requireAuth, async (_req, res) => {
+    const stunUrls = (
+      process.env.STUN_SERVERS ||
+      process.env.VITE_STUN_SERVERS ||
+      'stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302'
+    )
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const iceServers: Array<{
+      urls: string | string[];
+      username?: string;
+      credential?: string;
+    }> = [{ urls: stunUrls }];
+
+    let turnConfigured = false;
+    let turnProvider: 'cloudflare_calls' | 'static_turn' | 'none' = 'none';
+
+    const staticTurnUrl = process.env.TURN_URLS || process.env.TURN_SERVER_URL;
+    const staticTurnUser = process.env.TURN_USERNAME;
+    const staticTurnCred = process.env.TURN_CREDENTIAL;
+    if (staticTurnUrl && staticTurnUser && staticTurnCred) {
+      iceServers.push({
+        urls: staticTurnUrl
+          .split(',')
+          .map((u) => u.trim())
+          .filter(Boolean),
+        username: staticTurnUser.trim(),
+        credential: staticTurnCred.trim(),
+      });
+      turnConfigured = true;
+      turnProvider = 'static_turn';
+    }
+
+    const turnKeyId = process.env.TURN_KEY_ID?.trim();
+    const turnApiToken = process.env.TURN_API_TOKEN?.trim();
+    if (!turnConfigured && turnKeyId && turnApiToken && !turnKeyId.includes('OPTIONAL')) {
+      try {
+        const cfTurnRes = await fetch(
+          `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(
+            turnKeyId
+          )}/credentials/generate`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${turnApiToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ ttl: 3600 }),
+          }
+        );
+        if (cfTurnRes.ok) {
+          const cfTurnData = (await cfTurnRes.json()) as {
+            iceServers?:
+              | { urls: string | string[]; username?: string; credential?: string }
+              | Array<{ urls: string | string[]; username?: string; credential?: string }>;
+          };
+          if (cfTurnData.iceServers) {
+            const entries = Array.isArray(cfTurnData.iceServers)
+              ? cfTurnData.iceServers
+              : [cfTurnData.iceServers];
+            for (const entry of entries) {
+              if (entry && entry.urls) {
+                iceServers.push(entry);
+                turnConfigured = true;
+                turnProvider = 'cloudflare_calls';
+              }
+            }
+          }
+        }
+      } catch {
+        // Fallback to free public STUN
+      }
+    }
+
+    res.json({
+      iceServers,
+      turnConfigured,
+      turnProvider,
+      mediaConstraints: {
+        width: 640,
+        height: 360,
+        frameRate: 24,
+        maxVideoBitrateBps: 500_000,
+      },
+    });
+  });
+
   // 2. Authentication Routes
   router.post('/auth/register', authRateLimiter, (req, res) => {
     const {

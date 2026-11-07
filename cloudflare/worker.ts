@@ -310,6 +310,104 @@ export async function handleApiRequest(request: Request, env: Env, url: URL): Pr
     return json({ interests: SEEDED_INTERESTS });
   }
 
+  // 2b. GET /api/webrtc/ice-servers (Authenticated STUN + Optional TURN Relay Credentials)
+  if (path === '/api/webrtc/ice-servers' && method === 'GET') {
+    const user = getAuthUser(request, env);
+    if (!user) {
+      return json({ error: 'Authentication required.' }, 401);
+    }
+
+    const stunUrls = (
+      env.STUN_SERVERS || 'stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302'
+    )
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const iceServers: Array<{
+      urls: string | string[];
+      username?: string;
+      credential?: string;
+    }> = [{ urls: stunUrls }];
+
+    let turnConfigured = false;
+    let turnProvider: 'cloudflare_calls' | 'static_turn' | 'none' = 'none';
+
+    // Support static TURN credentials if configured in environment
+    const staticTurnUrl = (env as Record<string, unknown>).TURN_URLS || (env as Record<string, unknown>).TURN_SERVER_URL;
+    const staticTurnUser = (env as Record<string, unknown>).TURN_USERNAME;
+    const staticTurnCred = (env as Record<string, unknown>).TURN_CREDENTIAL;
+    if (
+      typeof staticTurnUrl === 'string' &&
+      staticTurnUrl.trim() &&
+      typeof staticTurnUser === 'string' &&
+      typeof staticTurnCred === 'string'
+    ) {
+      iceServers.push({
+        urls: staticTurnUrl
+          .split(',')
+          .map((u) => u.trim())
+          .filter(Boolean),
+        username: staticTurnUser.trim(),
+        credential: staticTurnCred.trim(),
+      });
+      turnConfigured = true;
+      turnProvider = 'static_turn';
+    }
+
+    // Support Cloudflare Realtime / Calls TURN short-lived credential generation
+    if (!turnConfigured && env.TURN_KEY_ID && env.TURN_API_TOKEN) {
+      try {
+        const cfTurnRes = await fetch(
+          `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(
+            env.TURN_KEY_ID.trim()
+          )}/credentials/generate`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${env.TURN_API_TOKEN.trim()}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ ttl: 3600 }),
+          }
+        );
+        if (cfTurnRes.ok) {
+          const cfTurnData = (await cfTurnRes.json()) as {
+            iceServers?:
+              | { urls: string | string[]; username?: string; credential?: string }
+              | Array<{ urls: string | string[]; username?: string; credential?: string }>;
+          };
+          if (cfTurnData.iceServers) {
+            const entries = Array.isArray(cfTurnData.iceServers)
+              ? cfTurnData.iceServers
+              : [cfTurnData.iceServers];
+            for (const entry of entries) {
+              if (entry && entry.urls) {
+                iceServers.push(entry);
+                turnConfigured = true;
+                turnProvider = 'cloudflare_calls';
+              }
+            }
+          }
+        }
+      } catch {
+        // Fallback cleanly to free public STUN servers if TURN API is unreachable
+      }
+    }
+
+    return json({
+      iceServers,
+      turnConfigured,
+      turnProvider,
+      mediaConstraints: {
+        width: 640,
+        height: 360,
+        frameRate: 24,
+        maxVideoBitrateBps: 500_000,
+      },
+    });
+  }
+
   // 3. GET /api/auth/me
   if (path === '/api/auth/me' && method === 'GET') {
     const user = getAuthUser(request, env);

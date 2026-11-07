@@ -312,6 +312,7 @@ export class MatchmakerDurableObject {
     if (
       type === 'webrtc:sdp' ||
       type === 'webrtc:ice' ||
+      type === 'webrtc:ready' ||
       type === 'stranger:message' ||
       type === 'stranger:typing' ||
       type === 'stranger:media-state'
@@ -449,7 +450,7 @@ export class MatchmakerDurableObject {
   }
 
   /**
-   * Relays WebRTC SDP offers/answers, ICE candidates, or ephemeral text/typing/media-state messages
+   * Relays WebRTC SDP offers/answers, ICE candidates, peer readiness, or ephemeral text/typing/media-state messages
    * strictly within an authenticated active session between the two matched partners.
    */
   public relaySessionPayload(
@@ -458,6 +459,7 @@ export class MatchmakerDurableObject {
       type:
         | 'webrtc:sdp'
         | 'webrtc:ice'
+        | 'webrtc:ready'
         | 'stranger:message'
         | 'stranger:typing'
         | 'stranger:media-state';

@@ -462,12 +462,28 @@ async function runBackendVerificationTests(): Promise<void> {
     'Skipping user (Amaya) must automatically re-enter queue:waiting'
   );
 
-  // 9h. Pair again and verify abrupt WebSocket disconnect cleanup
+  // 9h. Pair again, verify webrtc:ready relay, and verify abrupt WebSocket disconnect cleanup
   kavanClient.send(JSON.stringify({ type: 'queue:join', mode: 'video' }));
+  const secondMatchMsg = amayaClient.receivedMessages.at(-1) as {
+    type: string;
+    sessionId: string;
+  };
   assert.equal(
-    amayaClient.receivedMessages.at(-1)?.type,
+    secondMatchMsg.type,
     'match:found',
     'Amaya and Kavan must match again when Kavan rejoins queue'
+  );
+
+  kavanClient.send(
+    JSON.stringify({
+      type: 'webrtc:ready',
+      sessionId: secondMatchMsg.sessionId,
+    })
+  );
+  assert.equal(
+    amayaClient.receivedMessages.at(-1)?.type,
+    'webrtc:ready',
+    'Amaya must receive webrtc:ready signal from responder Kavan'
   );
 
   amayaClient.close(1001, 'Tab closed');
@@ -477,6 +493,42 @@ async function runBackendVerificationTests(): Promise<void> {
     'Kavan must immediately receive stranger:disconnected when Amaya closes her WebSocket'
   );
   kavanClient.close(1000, 'Done');
+
+  // 10. Verify GET /api/webrtc/ice-servers (Free STUN + Optional TURN + 640x360@24fps / 500 Kbps profile)
+  const iceReq = new Request('https://once-upon-a-lanka.workers.dev/api/webrtc/ice-servers', {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${loginData.token}` },
+  });
+  const iceRes = await handleApiRequest(iceReq, {}, new URL(iceReq.url));
+  assert.equal(iceRes.status, 200, 'GET /api/webrtc/ice-servers must return HTTP 200');
+  const iceData = (await iceRes.json()) as {
+    iceServers: Array<{ urls: string | string[]; username?: string }>;
+    turnConfigured: boolean;
+    mediaConstraints: { width: number; height: number; frameRate: number; maxVideoBitrateBps: number };
+  };
+  assert.ok(Array.isArray(iceData.iceServers) && iceData.iceServers.length >= 1, 'Must return STUN iceServers');
+  assert.equal(iceData.turnConfigured, false, 'Default free mode has turnConfigured=false');
+  assert.equal(iceData.mediaConstraints.width, 640, 'Video width constraint must be 640');
+  assert.equal(iceData.mediaConstraints.height, 360, 'Video height constraint must be 360');
+  assert.equal(iceData.mediaConstraints.frameRate, 24, 'Video frameRate constraint must be 24');
+  assert.equal(iceData.mediaConstraints.maxVideoBitrateBps, 500_000, 'Max video bitrate must be 500 Kbps');
+
+  // Verify static TURN credentials when configured in environment
+  const iceTurnRes = await handleApiRequest(
+    iceReq,
+    {
+      TURN_URLS: 'turn:turn.cloudflare.com:3478',
+      TURN_USERNAME: 'ouat_turn_user',
+      TURN_CREDENTIAL: 'ouat_turn_secret',
+    } as Record<string, unknown>,
+    new URL(iceReq.url)
+  );
+  const iceTurnData = (await iceTurnRes.json()) as {
+    iceServers: Array<{ urls: string | string[]; username?: string }>;
+    turnConfigured: boolean;
+  };
+  assert.equal(iceTurnData.turnConfigured, true, 'TURN must be enabled when credentials are set');
+  assert.equal(iceTurnData.iceServers.length, 2, 'Must include both STUN and TURN server entries');
 
   console.log('ALL BACKEND & DURABLE OBJECT WEBSOCKET TESTS PASSED.');
 }

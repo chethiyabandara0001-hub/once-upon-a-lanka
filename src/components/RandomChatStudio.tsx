@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Video,
   VideoOff,
@@ -11,6 +11,9 @@ import {
   Send,
   Radio,
   Lock,
+  Activity,
+  RefreshCw,
+  Volume2,
 } from 'lucide-react';
 import type { AuthenticatedUser } from '../types';
 import { apiRequest, buildWebSocketUrl } from '../api';
@@ -34,11 +37,123 @@ interface MatchedPartnerMeta {
   sharedInterests: string[];
 }
 
-const RTC_CONFIG: RTCConfiguration = {
-  iceServers: [
-    { urls: 'stun:stun.cloudflare.com:3478' },
-    { urls: 'stun:stun.l.google.com:19302' },
-  ],
+interface IceServersApiResponse {
+  iceServers: RTCIceServer[];
+  turnConfigured: boolean;
+  turnProvider: 'cloudflare_calls' | 'static_turn' | 'none';
+  mediaConstraints?: {
+    width: number;
+    height: number;
+    frameRate: number;
+    maxVideoBitrateBps: number;
+  };
+}
+
+interface WebRtcDiagnostics {
+  role: 'idle' | 'initiator (offerer)' | 'responder (answerer)';
+  signalingState: string;
+  iceConnectionState: string;
+  connectionState: string;
+  iceGatheringState: string;
+  localTracksSummary: string;
+  remoteTracksSummary: string;
+  remoteVideoReady: boolean;
+  sdpStatus: string;
+  iceSent: number;
+  iceReceived: number;
+  iceQueued: number;
+  iceApplied: number;
+  turnConfigured: boolean;
+  maxBitrateKbps: number;
+  lastError: string | null;
+  events: string[];
+}
+
+const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
+  { urls: 'stun:stun.cloudflare.com:3478' },
+  { urls: 'stun:stun.l.google.com:19302' },
+];
+
+const TARGET_VIDEO_WIDTH = 640;
+const TARGET_VIDEO_HEIGHT = 360;
+const TARGET_VIDEO_FPS = 24;
+const MAX_VIDEO_BITRATE_BPS = 500_000; // 500 Kbps
+
+/**
+ * Sanitizes error messages so session tokens or private SDP keys/fingerprints
+ * are never exposed in logs or UI diagnostics.
+ */
+function sanitizeWebRtcErrorMessage(raw: unknown): string {
+  const message =
+    raw instanceof Error
+      ? `${raw.name}: ${raw.message}`
+      : typeof raw === 'string'
+      ? raw
+      : JSON.stringify(raw || 'Unknown WebRTC error');
+
+  return message
+    .replace(/token=[^&\s]+/gi, 'token=[REDACTED]')
+    .replace(/ouat_v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[REDACTED_TOKEN]')
+    .replace(/a=(ice-pwd|ice-ufrag|fingerprint):[^\r\n]+/gi, 'a=$1:[REDACTED]');
+}
+
+/**
+ * Adds a 500 Kbps bandwidth limit line (b=AS:500) to the video media section of an SDP
+ * as a universal fallback alongside RTCRtpSender.setParameters(maxBitrate = 500_000).
+ */
+function enforceSdpVideoBitrateKbps(sdp: string, maxKbps = 500): string {
+  if (!sdp || !sdp.includes('m=video')) return sdp;
+  const lines = sdp.split(/\r?\n/);
+  const out: string[] = [];
+  let inVideoSection = false;
+  let bandwidthInserted = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith('m=video')) {
+      inVideoSection = true;
+      bandwidthInserted = false;
+      out.push(line);
+      continue;
+    }
+    if (line.startsWith('m=') && !line.startsWith('m=video')) {
+      inVideoSection = false;
+    }
+    if (inVideoSection && (line.startsWith('b=AS:') || line.startsWith('b=TIAS:'))) {
+      continue;
+    }
+    out.push(line);
+    if (
+      inVideoSection &&
+      !bandwidthInserted &&
+      (line.startsWith('c=IN') || line.startsWith('a=mid:'))
+    ) {
+      out.push(`b=AS:${maxKbps}`);
+      out.push(`b=TIAS:${maxKbps * 1000}`);
+      bandwidthInserted = true;
+    }
+  }
+  return out.join('\r\n');
+}
+
+const INITIAL_DIAGNOSTICS: WebRtcDiagnostics = {
+  role: 'idle',
+  signalingState: 'closed',
+  iceConnectionState: 'idle',
+  connectionState: 'idle',
+  iceGatheringState: 'new',
+  localTracksSummary: 'none',
+  remoteTracksSummary: 'none',
+  remoteVideoReady: false,
+  sdpStatus: 'idle',
+  iceSent: 0,
+  iceReceived: 0,
+  iceQueued: 0,
+  iceApplied: 0,
+  turnConfigured: false,
+  maxBitrateKbps: 500,
+  lastError: null,
+  events: [],
 };
 
 export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
@@ -75,38 +190,221 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
   const [safetyFeedback, setSafetyFeedback] = useState<string | null>(null);
   const [webrtcError, setWebrtcError] = useState<string | null>(null);
   const [iceState, setIceState] = useState<string>('idle');
+  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(true);
+  const [remoteAudioBlocked, setRemoteAudioBlocked] = useState<boolean>(false);
+  const [diagnostics, setDiagnostics] = useState<WebRtcDiagnostics>(INITIAL_DIAGNOSTICS);
 
   const wsRef = useRef<WebSocket | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const isInitiatorRef = useRef<boolean>(false);
+  const modeRef = useRef<'video' | 'text'>('video');
   const typingTimeoutRef = useRef<number | null>(null);
+  const iceTimeoutRef = useRef<number | null>(null);
+
+  // Ordered WebRTC signaling & Pending ICE Candidate Queue refs
+  const signalingChainRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingIceCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
+  const remoteDescriptionSetRef = useRef<boolean>(false);
+  const cachedIceConfigRef = useRef<{
+    iceServers: RTCIceServer[];
+    turnConfigured: boolean;
+  } | null>(null);
 
   const hasActiveMembership = user.membership.status === 'active';
 
-  const cleanupPeerConnection = () => {
+  const appendDiagnosticEvent = useCallback((label: string, isError = false) => {
+    const clean = sanitizeWebRtcErrorMessage(label);
+    const time = new Date().toLocaleTimeString([], {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    if (isError) {
+      console.error(`[OUAT WebRTC] ${clean}`);
+    } else {
+      console.info(`[OUAT WebRTC] ${clean}`);
+    }
+    setDiagnostics((prev) => ({
+      ...prev,
+      lastError: isError ? clean : prev.lastError,
+      events: [...prev.events.slice(-14), `${time} · ${clean}`],
+    }));
+  }, []);
+
+  const syncTrackDiagnostics = useCallback(() => {
+    const localStream = localStreamRef.current;
+    let localSummary = 'none';
+    if (localStream) {
+      const tracks = localStream.getTracks();
+      if (tracks.length > 0) {
+        localSummary = tracks
+          .map((t) => {
+            if (t.kind === 'video') {
+              const s = t.getSettings ? t.getSettings() : {};
+              const dim = s.width && s.height ? `${s.width}x${s.height}` : '640x360';
+              const fps = s.frameRate ? `@${Math.round(s.frameRate)}fps` : '@24fps';
+              return `video(${dim}${fps}, ${t.enabled ? 'on' : 'muted'})`;
+            }
+            return `${t.kind}(${t.enabled ? 'on' : 'muted'})`;
+          })
+          .join(', ');
+      }
+    }
+
+    const remoteStream = remoteStreamRef.current;
+    let remoteSummary = 'none';
+    let hasRemoteVideo = false;
+    if (remoteStream) {
+      const rTracks = remoteStream.getTracks();
+      if (rTracks.length > 0) {
+        hasRemoteVideo = rTracks.some((t) => t.kind === 'video' && t.readyState === 'live');
+        remoteSummary = rTracks
+          .map((t) => `${t.kind}(${t.readyState}${t.muted ? ',muted' : ',live'})`)
+          .join(', ');
+      }
+    }
+
+    setDiagnostics((prev) => ({
+      ...prev,
+      localTracksSummary: localSummary,
+      remoteTracksSummary: remoteSummary,
+      remoteVideoReady: hasRemoteVideo,
+    }));
+  }, []);
+
+  const attachStreamToRemoteVideo = useCallback(() => {
+    const videoEl = remoteVideoRef.current;
+    const stream = remoteStreamRef.current;
+    if (!videoEl || !stream) return;
+
+    if (videoEl.srcObject !== stream) {
+      videoEl.srcObject = stream;
+    }
+    videoEl.autoplay = true;
+    videoEl.playsInline = true;
+
+    const playPromise = videoEl.play();
+    if (playPromise && typeof playPromise.catch === 'function') {
+      playPromise
+        .then(() => {
+          setRemoteAudioBlocked(false);
+          syncTrackDiagnostics();
+        })
+        .catch((err: Error) => {
+          // If browser blocks unmuted autoplay, play muted immediately so video is visible
+          // and show a 1-click "Unmute Audio" button.
+          if (err.name === 'NotAllowedError') {
+            videoEl.muted = true;
+            setRemoteAudioBlocked(true);
+            videoEl.play().catch((innerErr) => {
+              appendDiagnosticEvent(
+                `Remote video playback blocked: ${sanitizeWebRtcErrorMessage(innerErr)}`,
+                true
+              );
+            });
+          } else if (err.name !== 'AbortError') {
+            appendDiagnosticEvent(
+              `Remote video play() notice: ${sanitizeWebRtcErrorMessage(err)}`,
+               false
+            );
+          }
+        });
+    }
+  }, [appendDiagnosticEvent, syncTrackDiagnostics]);
+
+  const attachStreamToLocalVideo = useCallback(() => {
+    const videoEl = localVideoRef.current;
+    const stream = localStreamRef.current;
+    if (!videoEl || !stream) return;
+
+    if (videoEl.srcObject !== stream) {
+      videoEl.srcObject = stream;
+    }
+    videoEl.muted = true;
+    videoEl.autoplay = true;
+    videoEl.playsInline = true;
+    videoEl.play().catch(() => {
+      // Local preview is muted; ignore benign AbortError on re-mount
+    });
+  }, []);
+
+  // Callback refs ensure <video> elements receive srcObject immediately upon DOM mount
+  const setRemoteVideoElement = useCallback(
+    (el: HTMLVideoElement | null) => {
+      remoteVideoRef.current = el;
+      if (el && remoteStreamRef.current) {
+        attachStreamToRemoteVideo();
+      }
+    },
+    [attachStreamToRemoteVideo]
+  );
+
+  const setLocalVideoElement = useCallback(
+    (el: HTMLVideoElement | null) => {
+      localVideoRef.current = el;
+      if (el && localStreamRef.current) {
+        attachStreamToLocalVideo();
+      }
+    },
+    [attachStreamToLocalVideo]
+  );
+
+  useEffect(() => {
+    if (stage === 'matched' || stage === 'waiting') {
+      attachStreamToLocalVideo();
+      attachStreamToRemoteVideo();
+    }
+  }, [stage, mode, attachStreamToLocalVideo, attachStreamToRemoteVideo]);
+
+  const clearIceNegotiationTimer = () => {
+    if (iceTimeoutRef.current) {
+      window.clearTimeout(iceTimeoutRef.current);
+      iceTimeoutRef.current = null;
+    }
+  };
+
+  const cleanupPeerConnection = useCallback(() => {
+    clearIceNegotiationTimer();
     setWebrtcError(null);
     setIceState('idle');
+    setRemoteAudioBlocked(false);
+    pendingIceCandidatesRef.current = [];
+    remoteDescriptionSetRef.current = false;
+
     if (pcRef.current) {
       try {
         pcRef.current.onicecandidate = null;
         pcRef.current.ontrack = null;
         pcRef.current.oniceconnectionstatechange = null;
         pcRef.current.onconnectionstatechange = null;
+        pcRef.current.onsignalingstatechange = null;
+        pcRef.current.onicegatheringstatechange = null;
         pcRef.current.close();
-      } catch {
-        // Ignore
+      } catch (err) {
+        console.warn('[OUAT WebRTC] Error closing RTCPeerConnection:', sanitizeWebRtcErrorMessage(err));
       }
       pcRef.current = null;
     }
+
+    remoteStreamRef.current = null;
     if (remoteVideoRef.current) {
       remoteVideoRef.current.srcObject = null;
     }
-  };
 
-  const stopLocalMedia = () => {
+    setDiagnostics((prev) => ({
+      ...INITIAL_DIAGNOSTICS,
+      turnConfigured: prev.turnConfigured,
+      localTracksSummary: prev.localTracksSummary,
+    }));
+  }, []);
+
+  const stopLocalMedia = useCallback(() => {
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
       localStreamRef.current = null;
@@ -114,100 +412,705 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = null;
     }
-  };
+    syncTrackDiagnostics();
+  }, [syncTrackDiagnostics]);
 
-  const ensureLocalMedia = async () => {
-    if (mode !== 'video') return null;
-    if (localStreamRef.current) return localStreamRef.current;
+  /**
+   * Captures 640x360 @ 24 FPS video + echo-cancelled audio via getUserMedia.
+   */
+  const ensureLocalMedia = useCallback(async (): Promise<MediaStream | null> => {
+    if (modeRef.current !== 'video') return null;
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
-        audio: true,
-      });
-      localStreamRef.current = stream;
-      setMediaPermissionState('granted');
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
+    if (localStreamRef.current) {
+      const activeTracks = localStreamRef.current
+        .getTracks()
+        .filter((t) => t.readyState === 'live');
+      if (activeTracks.length > 0) {
+        attachStreamToLocalVideo();
+        syncTrackDiagnostics();
+        return localStreamRef.current;
       }
-      return stream;
-    } catch {
+      localStreamRef.current = null;
+    }
+
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      const msg =
+        'Camera/microphone capture (navigator.mediaDevices.getUserMedia) is unavailable in this browser context. Ensure you are using HTTPS.';
       setMediaPermissionState('unavailable');
+      appendDiagnosticEvent(msg, true);
+      setWebrtcError(msg);
       return null;
     }
-  };
 
-  const initializeWebRtcForSession = async (sessionId: string, initiator: boolean) => {
-    cleanupPeerConnection();
-    const pc = new RTCPeerConnection(RTC_CONFIG);
-    pcRef.current = pc;
-
-    const stream = await ensureLocalMedia();
-    if (stream) {
-      stream.getTracks().forEach((track) => {
-        pc.addTrack(track, stream);
-      });
-    }
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'webrtc:ice',
-            sessionId,
-            data: event.candidate,
-          })
-        );
-      }
-    };
-
-    pc.ontrack = (event) => {
-      if (remoteVideoRef.current && event.streams[0]) {
-        remoteVideoRef.current.srcObject = event.streams[0];
-      }
-    };
-
-    pc.oniceconnectionstatechange = () => {
-      const state = pc.iceConnectionState;
-      setIceState(state);
-      if (state === 'failed') {
-        setWebrtcError(
-          'Peer-to-peer video connection failed (NAT traversal blocked). Free public STUN was queried, but Cloudflare TURN relay credentials are not configured in this development environment. Live text messaging below remains active.'
-        );
-      } else if (state === 'disconnected') {
-        setWebrtcError('WebRTC media stream was disconnected.');
-      } else if (state === 'connected' || state === 'completed') {
-        setWebrtcError(null);
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed') {
-        setWebrtcError(
-          'WebRTC connection failed. TURN relay servers are optional and not configured in free development mode.'
-        );
-      }
-    };
-
-    if (initiator) {
+    try {
+      let stream: MediaStream;
       try {
+        // Requirement 5 & 6: Capture 640x360 at 24 FPS + audio
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: TARGET_VIDEO_WIDTH, max: TARGET_VIDEO_WIDTH },
+            height: { ideal: TARGET_VIDEO_HEIGHT, max: TARGET_VIDEO_HEIGHT },
+            frameRate: { ideal: TARGET_VIDEO_FPS, max: TARGET_VIDEO_FPS },
+            facingMode: 'user',
+          },
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      } catch (constraintErr) {
+        appendDiagnosticEvent(
+          `Strict 640x360@24fps constraint fallback: ${sanitizeWebRtcErrorMessage(constraintErr)}`,
+          false
+        );
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: TARGET_VIDEO_WIDTH },
+            height: { ideal: TARGET_VIDEO_HEIGHT },
+            frameRate: { ideal: TARGET_VIDEO_FPS },
+            facingMode: 'user',
+          },
+          audio: true,
+        });
+      }
+
+      // Apply 640x360 @ 24fps constraints on captured video track
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack && typeof videoTrack.applyConstraints === 'function') {
+        await videoTrack
+          .applyConstraints({
+            width: { ideal: TARGET_VIDEO_WIDTH, max: TARGET_VIDEO_WIDTH },
+            height: { ideal: TARGET_VIDEO_HEIGHT, max: TARGET_VIDEO_HEIGHT },
+            frameRate: { ideal: TARGET_VIDEO_FPS, max: TARGET_VIDEO_FPS },
+          })
+          .catch(() => {
+            // Keep stream even if hardware driver locks native resolution
+          });
+      }
+
+      // Respect current cameraOn / micOn toggles
+      stream.getVideoTracks().forEach((t) => {
+        t.enabled = cameraOn;
+      });
+      stream.getAudioTracks().forEach((t) => {
+        t.enabled = micOn;
+      });
+
+      localStreamRef.current = stream;
+      setMediaPermissionState('granted');
+      attachStreamToLocalVideo();
+      syncTrackDiagnostics();
+      appendDiagnosticEvent(
+        `Captured local media: ${stream.getVideoTracks().length} video (640x360@24fps), ${
+          stream.getAudioTracks().length
+        } audio track(s)`
+      );
+      return stream;
+    } catch (err) {
+      setMediaPermissionState('unavailable');
+      const cleanErr = sanitizeWebRtcErrorMessage(err);
+      appendDiagnosticEvent(`getUserMedia failed: ${cleanErr}`, true);
+      setWebrtcError(
+        `Could not access your camera or microphone (${cleanErr}). Please grant camera & microphone permissions in your browser address bar and retry.`
+      );
+      return null;
+    }
+  }, [
+    attachStreamToLocalVideo,
+    appendDiagnosticEvent,
+    cameraOn,
+    micOn,
+    syncTrackDiagnostics,
+  ]);
+
+  /**
+   * Fetches STUN + optional TURN credentials from /api/webrtc/ice-servers.
+   */
+  const fetchIceConfiguration = useCallback(async (): Promise<{
+    iceServers: RTCIceServer[];
+    turnConfigured: boolean;
+  }> => {
+    if (cachedIceConfigRef.current) {
+      return cachedIceConfigRef.current;
+    }
+    try {
+      const data = await apiRequest<IceServersApiResponse>('/webrtc/ice-servers');
+      if (data && Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+        const config = {
+          iceServers: data.iceServers,
+          turnConfigured: Boolean(data.turnConfigured),
+        };
+        cachedIceConfigRef.current = config;
+        setDiagnostics((prev) => ({
+          ...prev,
+          turnConfigured: config.turnConfigured,
+        }));
+        return config;
+      }
+    } catch (err) {
+      appendDiagnosticEvent(
+        `ICE config endpoint fallback to default STUN: ${sanitizeWebRtcErrorMessage(err)}`,
+        false
+      );
+    }
+    return {
+      iceServers: DEFAULT_ICE_SERVERS,
+      turnConfigured: false,
+    };
+  }, [appendDiagnosticEvent]);
+
+  /**
+   * Caps outgoing video RTCRtpSender bitrate to 500 Kbps and framerate to 24 FPS.
+   */
+  const applyVideoSenderBitrateLimit = useCallback(
+    async (pc: RTCPeerConnection) => {
+      const senders = pc.getSenders ? pc.getSenders() : [];
+      for (const sender of senders) {
+        if (sender.track && sender.track.kind === 'video' && typeof sender.getParameters === 'function') {
+          try {
+            const params = sender.getParameters() || ({} as RTCRtpSendParameters);
+            if (!params.encodings || params.encodings.length === 0) {
+              params.encodings = [{}];
+            }
+            params.encodings[0].maxBitrate = MAX_VIDEO_BITRATE_BPS; // 500 Kbps
+            params.encodings[0].maxFramerate = TARGET_VIDEO_FPS; // 24 FPS
+            await sender.setParameters(params);
+            appendDiagnosticEvent('Applied 500 Kbps / 24 FPS cap on outgoing video RTCRtpSender');
+          } catch (err) {
+            appendDiagnosticEvent(
+              `RTCRtpSender bitrate parameter note: ${sanitizeWebRtcErrorMessage(err)}`,
+              false
+            );
+          }
+        }
+      }
+    },
+    [appendDiagnosticEvent]
+  );
+
+  /**
+   * Drains and applies all queued ICE candidates ONLY after setRemoteDescription has succeeded.
+   */
+  const flushPendingIceCandidates = useCallback(
+    async (pc: RTCPeerConnection) => {
+      if (!remoteDescriptionSetRef.current || !pc.remoteDescription) {
+        return;
+      }
+      const pending = pendingIceCandidatesRef.current.splice(
+        0,
+        pendingIceCandidatesRef.current.length
+      );
+      if (pending.length === 0) return;
+
+      appendDiagnosticEvent(`Flushing ${pending.length} queued ICE candidate(s) after setRemoteDescription`);
+      for (const candidateInit of pending) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidateInit));
+          setDiagnostics((prev) => ({
+            ...prev,
+            iceQueued: pendingIceCandidatesRef.current.length,
+            iceApplied: prev.iceApplied + 1,
+          }));
+        } catch (err) {
+          appendDiagnosticEvent(
+            `Failed to apply queued ICE candidate: ${sanitizeWebRtcErrorMessage(err)}`,
+            true
+          );
+        }
+      }
+    },
+    [appendDiagnosticEvent]
+  );
+
+  /**
+   * Initializes RTCPeerConnection, attaches local video+audio tracks BEFORE SDP negotiation,
+   * sets up remote stream attachment, and sends the SDP offer if initiator === true.
+   */
+  const initializeWebRtcForSession = useCallback(
+    async (sessionId: string, initiator: boolean): Promise<RTCPeerConnection | null> => {
+      cleanupPeerConnection();
+      isInitiatorRef.current = initiator;
+
+      const roleLabel = initiator ? 'initiator (offerer)' : 'responder (answerer)';
+      setDiagnostics((prev) => ({
+        ...INITIAL_DIAGNOSTICS,
+        role: roleLabel,
+        signalingState: 'new',
+        iceConnectionState: 'new',
+        connectionState: 'new',
+        sdpStatus: initiator ? 'preparing-offer' : 'waiting-for-offer',
+      }));
+      appendDiagnosticEvent(`Initializing WebRTC session as ${roleLabel}`);
+
+      // 1. Fetch STUN + optional TURN configuration & capture local 640x360@24fps media
+      const [iceConfig, localStream] = await Promise.all([
+        fetchIceConfiguration(),
+        ensureLocalMedia(),
+      ]);
+
+      // Abort if user skipped/left while awaiting media permission
+      if (sessionIdRef.current !== sessionId) {
+        return null;
+      }
+
+      const pc = new RTCPeerConnection({
+        iceServers: iceConfig.iceServers,
+        iceCandidatePoolSize: 4,
+      });
+      pcRef.current = pc;
+
+      // Prepare remote MediaStream container immediately
+      const remoteStream = new MediaStream();
+      remoteStreamRef.current = remoteStream;
+
+      // 2. Add local video and audio tracks BEFORE SDP offer/answer creation
+      if (localStream) {
+        const videoTracks = localStream.getVideoTracks();
+        const audioTracks = localStream.getAudioTracks();
+
+        for (const track of videoTracks) {
+          pc.addTrack(track, localStream);
+        }
+        for (const track of audioTracks) {
+          pc.addTrack(track, localStream);
+        }
+
+        if (videoTracks.length === 0 && typeof pc.addTransceiver === 'function') {
+          pc.addTransceiver('video', { direction: 'recvonly' });
+        }
+        if (audioTracks.length === 0 && typeof pc.addTransceiver === 'function') {
+          pc.addTransceiver('audio', { direction: 'recvonly' });
+        }
+      } else if (typeof pc.addTransceiver === 'function') {
+        // Still allow receiving partner's video & audio even if local camera is unavailable
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+      }
+
+      syncTrackDiagnostics();
+      await applyVideoSenderBitrateLimit(pc);
+
+      // 3. Attach WebRTC state & diagnostic listeners
+      pc.onsignalingstatechange = () => {
+        setDiagnostics((prev) => ({
+          ...prev,
+          signalingState: pc.signalingState || 'unknown',
+        }));
+        appendDiagnosticEvent(`signalingState -> ${pc.signalingState}`);
+      };
+
+      pc.onicegatheringstatechange = () => {
+        setDiagnostics((prev) => ({
+          ...prev,
+          iceGatheringState: pc.iceGatheringState || 'unknown',
+        }));
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
+          const candidateJson =
+            typeof event.candidate.toJSON === 'function'
+              ? event.candidate.toJSON()
+              : {
+                  candidate: event.candidate.candidate,
+                  sdpMid: event.candidate.sdpMid,
+                  sdpMLineIndex: event.candidate.sdpMLineIndex,
+                  usernameFragment: event.candidate.usernameFragment,
+                };
+
+          wsRef.current.send(
+            JSON.stringify({
+              type: 'webrtc:ice',
+              sessionId,
+              data: candidateJson,
+            })
+          );
+          setDiagnostics((prev) => ({
+            ...prev,
+            iceSent: prev.iceSent + 1,
+          }));
+        }
+      };
+
+      // Requirement 7: Attach remote tracks to remoteVideoRef.srcObject reliably
+      pc.ontrack = (event) => {
+        appendDiagnosticEvent(
+          `ontrack received: kind=${event.track.kind}, streams=${event.streams?.length || 0}`
+        );
+
+        let targetStream = remoteStreamRef.current;
+        if (event.streams && event.streams[0]) {
+          targetStream = event.streams[0];
+          remoteStreamRef.current = targetStream;
+        } else {
+          if (!targetStream) {
+            targetStream = new MediaStream();
+            remoteStreamRef.current = targetStream;
+          }
+          if (!targetStream.getTracks().some((t) => t.id === event.track.id)) {
+            targetStream.addTrack(event.track);
+          }
+        }
+
+        event.track.onunmute = () => {
+          syncTrackDiagnostics();
+          attachStreamToRemoteVideo();
+        };
+
+        event.track.onended = () => {
+          syncTrackDiagnostics();
+        };
+
+        syncTrackDiagnostics();
+        attachStreamToRemoteVideo();
+      };
+
+      const startIceWatchdog = () => {
+        clearIceNegotiationTimer();
+        iceTimeoutRef.current = window.setTimeout(() => {
+          if (
+            pcRef.current === pc &&
+            pc.iceConnectionState !== 'connected' &&
+            pc.iceConnectionState !== 'completed'
+          ) {
+            const noTurnMsg = iceConfig.turnConfigured
+              ? 'ICE negotiation timed out waiting for peer connectivity. Click "Retry Video" to restart ICE.'
+              : 'ICE connection timed out — direct UDP hole-punching was blocked by a symmetric NAT or firewall, and no TURN relay server is configured. Configure TURN_KEY_ID / TURN_API_TOKEN for relay traversal, or use live text chat below.';
+            setWebrtcError(noTurnMsg);
+            appendDiagnosticEvent(noTurnMsg, true);
+          }
+        }, 15000);
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        const state = pc.iceConnectionState;
+        setIceState(state);
+        setDiagnostics((prev) => ({
+          ...prev,
+          iceConnectionState: state,
+        }));
+        appendDiagnosticEvent(`iceConnectionState -> ${state}`);
+
+        if (state === 'checking') {
+          startIceWatchdog();
+        } else if (state === 'connected' || state === 'completed') {
+          clearIceNegotiationTimer();
+          setWebrtcError(null);
+          syncTrackDiagnostics();
+          attachStreamToRemoteVideo();
+        } else if (state === 'failed') {
+          clearIceNegotiationTimer();
+          const failMsg = iceConfig.turnConfigured
+            ? 'Peer-to-peer ICE negotiation failed even with TURN configured. Click "Retry Video" to attempt an ICE restart.'
+            : 'ICE connection failed: Direct peer-to-peer media was blocked by a firewall/symmetric NAT and no TURN relay server is configured. Live text chat remains active.';
+          setWebrtcError(failMsg);
+          appendDiagnosticEvent(failMsg, true);
+        } else if (state === 'disconnected') {
+          setWebrtcError(
+            'Peer media stream temporarily disconnected. Attempting automatic recovery...'
+          );
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        const cState = pc.connectionState || 'unknown';
+        setDiagnostics((prev) => ({
+          ...prev,
+          connectionState: cState,
+        }));
+        appendDiagnosticEvent(`connectionState -> ${cState}`);
+
+        if (cState === 'connected') {
+          clearIceNegotiationTimer();
+          setWebrtcError(null);
+          syncTrackDiagnostics();
+          attachStreamToRemoteVideo();
+        } else if (cState === 'failed') {
+          clearIceNegotiationTimer();
+          const failMsg = iceConfig.turnConfigured
+            ? 'WebRTC peer connection failed. Click "Retry Video" to renegotiate.'
+            : 'WebRTC peer connection failed (no TURN relay available for this network path).';
+          setWebrtcError(failMsg);
+          appendDiagnosticEvent(failMsg, true);
+        }
+      };
+
+      // 4. If Initiator: create SDP offer, apply 500 Kbps limit, setLocalDescription, and send
+      if (initiator) {
+        try {
+          const offer = await pc.createOffer({
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: true,
+          });
+          const cappedOffer: RTCSessionDescriptionInit = {
+            type: offer.type,
+            sdp: enforceSdpVideoBitrateKbps(offer.sdp || '', 500),
+          };
+          await pc.setLocalDescription(cappedOffer);
+          await applyVideoSenderBitrateLimit(pc);
+
+          if (wsRef.current?.readyState === WebSocket.OPEN && pc.localDescription) {
+            wsRef.current.send(
+              JSON.stringify({
+                type: 'webrtc:sdp',
+                sessionId,
+                data: {
+                  type: pc.localDescription.type,
+                  sdp: pc.localDescription.sdp,
+                },
+              })
+            );
+            setDiagnostics((prev) => ({
+              ...prev,
+              signalingState: pc.signalingState,
+              sdpStatus: 'offer-sent',
+            }));
+            appendDiagnosticEvent('SDP Offer created, setLocalDescription complete, and sent to peer');
+            startIceWatchdog();
+          }
+        } catch (err) {
+          const clean = sanitizeWebRtcErrorMessage(err);
+          appendDiagnosticEvent(`Offer creation failed: ${clean}`, true);
+          setWebrtcError(`Failed to create WebRTC SDP offer: ${clean}`);
+        }
+      } else {
+        // Responder notifies Initiator that its RTCPeerConnection + local tracks are ready
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(
+            JSON.stringify({
+              type: 'webrtc:ready',
+              sessionId,
+            })
+          );
+          appendDiagnosticEvent('Responder RTCPeerConnection ready; sent webrtc:ready signal');
+        }
+      }
+
+      return pc;
+    },
+    [
+      appendDiagnosticEvent,
+      applyVideoSenderBitrateLimit,
+      attachStreamToRemoteVideo,
+      cleanupPeerConnection,
+      ensureLocalMedia,
+      fetchIceConfiguration,
+      syncTrackDiagnostics,
+    ]
+  );
+
+  /**
+   * Processes incoming SDP Offer or Answer ONLY after RTCPeerConnection initialization completes.
+   */
+  const handleIncomingSdp = useCallback(
+    async (sessionId: string, rawData: unknown) => {
+      if (sessionIdRef.current !== sessionId) return;
+
+      let pc = pcRef.current;
+      if (!pc) {
+        appendDiagnosticEvent('RTCPeerConnection was not initialized before SDP arrived; initializing now');
+        pc = await initializeWebRtcForSession(sessionId, false);
+      }
+      if (!pc) return;
+
+      const sdpData = rawData as { type?: RTCSdpType; sdp?: string } | null;
+      if (!sdpData || !sdpData.type || !sdpData.sdp) {
+        appendDiagnosticEvent('Ignored malformed incoming SDP payload', true);
+        return;
+      }
+
+      try {
+        if (sdpData.type === 'offer') {
+          appendDiagnosticEvent('Received remote SDP Offer; applying setRemoteDescription');
+          await pc.setRemoteDescription(
+            new RTCSessionDescription({
+              type: 'offer',
+              sdp: sdpData.sdp,
+            })
+          );
+          remoteDescriptionSetRef.current = true;
+          setDiagnostics((prev) => ({
+            ...prev,
+            signalingState: pc!.signalingState,
+            sdpStatus: 'offer-received-remote-set',
+          }));
+
+          // Requirement 3: Apply queued ICE candidates now that setRemoteDescription succeeded
+          await flushPendingIceCandidates(pc);
+
+          // Requirement 4: Create Answer, apply 500 Kbps limit, setLocalDescription, and send
+          const answer = await pc.createAnswer();
+          const cappedAnswer: RTCSessionDescriptionInit = {
+            type: answer.type,
+            sdp: enforceSdpVideoBitrateKbps(answer.sdp || '', 500),
+          };
+          await pc.setLocalDescription(cappedAnswer);
+          await applyVideoSenderBitrateLimit(pc);
+
+          if (wsRef.current?.readyState === WebSocket.OPEN && pc.localDescription) {
+            wsRef.current.send(
+              JSON.stringify({
+                type: 'webrtc:sdp',
+                sessionId,
+                data: {
+                  type: pc.localDescription.type,
+                  sdp: pc.localDescription.sdp,
+                },
+              })
+            );
+            setDiagnostics((prev) => ({
+              ...prev,
+              signalingState: pc!.signalingState,
+              sdpStatus: 'answer-sent (negotiated)',
+            }));
+            appendDiagnosticEvent('SDP Answer created, setLocalDescription complete, and sent to initiator');
+          }
+        } else if (sdpData.type === 'answer') {
+          if (pc.signalingState !== 'have-local-offer') {
+            appendDiagnosticEvent(
+              `Skipped duplicate SDP Answer in signalingState=${pc.signalingState}`,
+              false
+            );
+            return;
+          }
+          appendDiagnosticEvent('Received remote SDP Answer; applying setRemoteDescription');
+          await pc.setRemoteDescription(
+            new RTCSessionDescription({
+              type: 'answer',
+              sdp: sdpData.sdp,
+            })
+          );
+          remoteDescriptionSetRef.current = true;
+          setDiagnostics((prev) => ({
+            ...prev,
+            signalingState: pc!.signalingState,
+            sdpStatus: 'answer-received (negotiated)',
+          }));
+
+          // Requirement 3: Flush queued ICE candidates now that setRemoteDescription succeeded
+          await flushPendingIceCandidates(pc);
+        }
+      } catch (err) {
+        const clean = sanitizeWebRtcErrorMessage(err);
+        appendDiagnosticEvent(`SDP ${sdpData.type} processing error: ${clean}`, true);
+        setWebrtcError(`WebRTC SDP negotiation error: ${clean}`);
+      }
+    },
+    [
+      appendDiagnosticEvent,
+      applyVideoSenderBitrateLimit,
+      flushPendingIceCandidates,
+      initializeWebRtcForSession,
+    ]
+  );
+
+  /**
+   * Queues ICE candidates until setRemoteDescription succeeds, or applies them immediately if ready.
+   */
+  const handleIncomingIceCandidate = useCallback(
+    async (sessionId: string, rawCandidate: unknown) => {
+      if (sessionIdRef.current !== sessionId || !rawCandidate) return;
+      const candidateInit = rawCandidate as RTCIceCandidateInit;
+      if (!candidateInit.candidate) return;
+
+      setDiagnostics((prev) => ({
+        ...prev,
+        iceReceived: prev.iceReceived + 1,
+      }));
+
+      const pc = pcRef.current;
+      // Requirement 2 & 3: Queue candidate if RTCPeerConnection or remoteDescription is not ready yet
+      if (!pc || !remoteDescriptionSetRef.current || !pc.remoteDescription) {
+        pendingIceCandidatesRef.current.push(candidateInit);
+        setDiagnostics((prev) => ({
+          ...prev,
+          iceQueued: pendingIceCandidatesRef.current.length,
+        }));
+        appendDiagnosticEvent(
+          `Queued incoming ICE candidate (queue size: ${pendingIceCandidatesRef.current.length})`
+        );
+        return;
+      }
+
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidateInit));
+        setDiagnostics((prev) => ({
+          ...prev,
+          iceApplied: prev.iceApplied + 1,
+        }));
+      } catch (err) {
+        appendDiagnosticEvent(
+          `addIceCandidate error: ${sanitizeWebRtcErrorMessage(err)}`,
+          true
+        );
+      }
+    },
+    [appendDiagnosticEvent]
+  );
+
+  /**
+   * Enqueues signaling operations sequentially so `initializeWebRtcForSession`
+   * always completes before incoming `webrtc:sdp` or `webrtc:ice` handlers execute.
+   */
+  const enqueueSignalingTask = useCallback(
+    (task: () => Promise<void>) => {
+      signalingChainRef.current = signalingChainRef.current
+        .then(task)
+        .catch((err) => {
+          appendDiagnosticEvent(
+            `Signaling task error: ${sanitizeWebRtcErrorMessage(err)}`,
+            true
+          );
+        });
+    },
+    [appendDiagnosticEvent]
+  );
+
+  /**
+   * Triggers an ICE Restart offer if connection failed or timed out.
+   */
+  const handleRetryVideoNegotiation = useCallback(() => {
+    const sid = sessionIdRef.current;
+    const pc = pcRef.current;
+    if (!sid || !pc || wsRef.current?.readyState !== WebSocket.OPEN) return;
+
+    setWebrtcError(null);
+    enqueueSignalingTask(async () => {
+      try {
+        appendDiagnosticEvent('Triggering WebRTC ICE Restart offer...');
         const offer = await pc.createOffer({
+          iceRestart: true,
           offerToReceiveAudio: true,
           offerToReceiveVideo: true,
         });
-        await pc.setLocalDescription(offer);
+        const cappedOffer: RTCSessionDescriptionInit = {
+          type: offer.type,
+          sdp: enforceSdpVideoBitrateKbps(offer.sdp || '', 500),
+        };
+        await pc.setLocalDescription(cappedOffer);
         wsRef.current?.send(
           JSON.stringify({
             type: 'webrtc:sdp',
-            sessionId,
-            data: pc.localDescription,
+            sessionId: sid,
+            data: {
+              type: pc.localDescription?.type,
+              sdp: pc.localDescription?.sdp,
+            },
           })
         );
-      } catch {
-        // Ignore SDP error
+        setDiagnostics((prev) => ({
+          ...prev,
+          sdpStatus: 'ice-restart-offer-sent',
+        }));
+      } catch (err) {
+        appendDiagnosticEvent(
+          `ICE restart failed: ${sanitizeWebRtcErrorMessage(err)}`,
+          true
+        );
       }
-    }
-  };
+    });
+  }, [appendDiagnosticEvent, enqueueSignalingTask]);
 
   useEffect(() => {
     let unmounted = false;
@@ -218,10 +1121,10 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
     let ws: WebSocket;
     try {
       ws = new WebSocket(buildWebSocketUrl());
-    } catch {
+    } catch (err) {
       setWsStatus('error');
       setWsError(
-        'Could not initialize WebSocket connection. Please verify your network connection and try reconnecting.'
+        `Could not initialize WebSocket connection: ${sanitizeWebRtcErrorMessage(err)}`
       );
       return;
     }
@@ -239,7 +1142,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
         try {
           ws.close();
         } catch {
-          // Ignore
+          // Ignore close error
         }
       }
     }, 8000);
@@ -251,6 +1154,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
       setWsConnected(true);
       setWsStatus('connected');
       setWsError(null);
+      appendDiagnosticEvent('WebSocket signaling connected (/ws)');
     };
 
     ws.onerror = () => {
@@ -279,140 +1183,183 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
       }
     };
 
-    ws.onmessage = async (event) => {
+    ws.onmessage = (event) => {
+      let msg: Record<string, unknown>;
       try {
-        const msg = JSON.parse(event.data);
-        const type = String(msg.type || '');
+        msg = JSON.parse(event.data) as Record<string, unknown>;
+      } catch (err) {
+        appendDiagnosticEvent(
+          `Invalid WebSocket JSON frame: ${sanitizeWebRtcErrorMessage(err)}`,
+          true
+        );
+        return;
+      }
 
-        if (type === 'connection:established') {
-          setWsConnected(true);
-          setWsStatus('connected');
-          setWsError(null);
-          return;
+      const type = String(msg.type || '');
+
+      if (type === 'connection:established') {
+        setWsConnected(true);
+        setWsStatus('connected');
+        setWsError(null);
+        return;
+      }
+
+      if (type === 'queue:waiting') {
+        setStage('waiting');
+        setPartner(null);
+        setActiveSessionId(null);
+        sessionIdRef.current = null;
+        setQueueSeconds(0);
+        appendDiagnosticEvent(`Joined matchmaking queue (${String(msg.mode || modeRef.current)})`);
+        return;
+      }
+
+      if (type === 'match:found') {
+        const sid = String(msg.sessionId || '');
+        const matchMode: 'video' | 'text' = msg.mode === 'text' ? 'text' : 'video';
+        const initiator = Boolean(msg.initiator);
+        const partnerMeta = msg.partner as MatchedPartnerMeta;
+
+        sessionIdRef.current = sid;
+        modeRef.current = matchMode;
+        setMode(matchMode);
+        setActiveSessionId(sid);
+        setPartner(partnerMeta);
+        setPartnerMedia({ cameraOn: true, micOn: true });
+        setStage('matched');
+        setMessages([
+          {
+            id: `sys_${Date.now()}`,
+            sender: 'system',
+            text: `Matched with ${partnerMeta.displayName}${
+              partnerMeta.region ? ` (${partnerMeta.region})` : ''
+            }. Say hello!`,
+            timestamp: new Date().toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+            }),
+          },
+        ]);
+
+        appendDiagnosticEvent(
+          `match:found received (sessionId=${sid}, mode=${matchMode}, initiator=${initiator})`
+        );
+
+        if (matchMode === 'video') {
+          enqueueSignalingTask(async () => {
+            await initializeWebRtcForSession(sid, initiator);
+          });
         }
+        return;
+      }
 
-        if (type === 'queue:waiting') {
-          setStage('waiting');
-          setPartner(null);
-          setActiveSessionId(null);
-          sessionIdRef.current = null;
-          setQueueSeconds(0);
-          return;
-        }
-
-        if (type === 'match:found') {
-          const sid = String(msg.sessionId);
-          sessionIdRef.current = sid;
-          setActiveSessionId(sid);
-          setPartner(msg.partner as MatchedPartnerMeta);
-          setPartnerMedia({ cameraOn: true, micOn: true });
-          setStage('matched');
-          setMessages([
-            {
-              id: `sys_${Date.now()}`,
-              sender: 'system',
-              text: `Matched with ${msg.partner.displayName}${
-                msg.partner.region ? ` (${msg.partner.region})` : ''
-              }. Say hello!`,
-              timestamp: new Date().toLocaleTimeString([], {
-                hour: '2-digit',
-                minute: '2-digit',
-              }),
-            },
-          ]);
-
-          if (msg.mode === 'video') {
-            await initializeWebRtcForSession(sid, Boolean(msg.initiator));
-          }
-          return;
-        }
-
-        if (type === 'webrtc:sdp' && pcRef.current) {
-          const desc = new RTCSessionDescription(msg.data);
-          await pcRef.current.setRemoteDescription(desc);
-          if (desc.type === 'offer') {
-            const answer = await pcRef.current.createAnswer();
-            await pcRef.current.setLocalDescription(answer);
+      if (type === 'webrtc:ready') {
+        const sid = String(msg.sessionId || sessionIdRef.current || '');
+        enqueueSignalingTask(async () => {
+          const pc = pcRef.current;
+          // If we are the initiator and the responder just finished initializing its PC
+          // while our offer hasn't been answered yet, re-send our localDescription offer
+          if (
+            pc &&
+            isInitiatorRef.current &&
+            sessionIdRef.current === sid &&
+            pc.localDescription &&
+            pc.localDescription.type === 'offer' &&
+            !remoteDescriptionSetRef.current &&
+            ws.readyState === WebSocket.OPEN
+          ) {
             ws.send(
               JSON.stringify({
                 type: 'webrtc:sdp',
-                sessionId: sessionIdRef.current,
-                data: pcRef.current.localDescription,
+                sessionId: sid,
+                data: {
+                  type: pc.localDescription.type,
+                  sdp: pc.localDescription.sdp,
+                },
               })
             );
+            appendDiagnosticEvent('Re-sent SDP Offer upon receiving responder webrtc:ready');
           }
-          return;
-        }
+        });
+        return;
+      }
 
-        if (type === 'webrtc:ice' && pcRef.current && msg.data) {
-          try {
-            await pcRef.current.addIceCandidate(new RTCIceCandidate(msg.data));
-          } catch {
-            // Ignore
-          }
-          return;
-        }
+      if (type === 'webrtc:sdp') {
+        const sid = String(msg.sessionId || sessionIdRef.current || '');
+        enqueueSignalingTask(async () => {
+          await handleIncomingSdp(sid, msg.data);
+        });
+        return;
+      }
 
-        if (type === 'stranger:message') {
-          const text = String(msg.data?.text || '');
-          if (text) {
-            setPartnerTyping(false);
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: `str_${Date.now()}_${Math.random()}`,
-                sender: 'stranger',
-                text,
-                timestamp: new Date().toLocaleTimeString([], {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                }),
-              },
-            ]);
-          }
-          return;
-        }
+      if (type === 'webrtc:ice') {
+        const sid = String(msg.sessionId || sessionIdRef.current || '');
+        enqueueSignalingTask(async () => {
+          await handleIncomingIceCandidate(sid, msg.data);
+        });
+        return;
+      }
 
-        if (type === 'stranger:typing') {
-          setPartnerTyping(true);
-          if (typingTimeoutRef.current) {
-            window.clearTimeout(typingTimeoutRef.current);
-          }
-          typingTimeoutRef.current = window.setTimeout(() => {
-            setPartnerTyping(false);
-          }, 2000);
-          return;
-        }
-
-        if (type === 'stranger:media-state' && msg.data) {
-          setPartnerMedia({
-            cameraOn: msg.data.cameraOn !== false,
-            micOn: msg.data.micOn !== false,
-          });
-          return;
-        }
-
-        if (type === 'stranger:disconnected') {
-          cleanupPeerConnection();
+      if (type === 'stranger:message') {
+        const dataObj = (msg.data || {}) as { text?: string };
+        const text = String(dataObj.text || '');
+        if (text) {
+          setPartnerTyping(false);
           setMessages((prev) => [
             ...prev,
             {
-              id: `sys_disc_${Date.now()}`,
-              sender: 'system',
-              text: 'Stranger disconnected. Click "Start video chat" or "Next" to meet someone new.',
+              id: `str_${Date.now()}_${Math.random()}`,
+              sender: 'stranger',
+              text,
               timestamp: new Date().toLocaleTimeString([], {
                 hour: '2-digit',
                 minute: '2-digit',
               }),
             },
           ]);
-          setStage('idle');
-          setPartner(null);
-          setActiveSessionId(null);
-          sessionIdRef.current = null;
         }
-      } catch {
-        // Ignore
+        return;
+      }
+
+      if (type === 'stranger:typing') {
+        setPartnerTyping(true);
+        if (typingTimeoutRef.current) {
+          window.clearTimeout(typingTimeoutRef.current);
+        }
+        typingTimeoutRef.current = window.setTimeout(() => {
+          setPartnerTyping(false);
+        }, 2000);
+        return;
+      }
+
+      if (type === 'stranger:media-state' && msg.data) {
+        const mediaObj = msg.data as { cameraOn?: boolean; micOn?: boolean };
+        setPartnerMedia({
+          cameraOn: mediaObj.cameraOn !== false,
+          micOn: mediaObj.micOn !== false,
+        });
+        return;
+      }
+
+      if (type === 'stranger:disconnected') {
+        appendDiagnosticEvent('Partner disconnected; cleaning up RTCPeerConnection');
+        cleanupPeerConnection();
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `sys_disc_${Date.now()}`,
+            sender: 'system',
+            text: 'Stranger disconnected. Click "Start video chat" or "Next" to meet someone new.',
+            timestamp: new Date().toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+            }),
+          },
+        ]);
+        setStage('idle');
+        setPartner(null);
+        setActiveSessionId(null);
+        sessionIdRef.current = null;
       }
     };
 
@@ -423,7 +1370,16 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
       stopLocalMedia();
       ws.close(1000, 'Component unmounted');
     };
-  }, [wsAttempt]);
+  }, [
+    wsAttempt,
+    appendDiagnosticEvent,
+    cleanupPeerConnection,
+    enqueueSignalingTask,
+    handleIncomingIceCandidate,
+    handleIncomingSdp,
+    initializeWebRtcForSession,
+    stopLocalMedia,
+  ]);
 
   useEffect(() => {
     if (stage !== 'waiting') return;
@@ -439,6 +1395,8 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
 
   const handleJoinQueue = async (selectedMode: 'video' | 'text') => {
     setSafetyFeedback(null);
+    setWebrtcError(null);
+
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
       setWsStatus('error');
       setWsError(
@@ -447,9 +1405,12 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
       return;
     }
 
+    modeRef.current = selectedMode;
     setMode(selectedMode);
+
     if (selectedMode === 'video') {
-      await ensureLocalMedia();
+      // Pre-warm ICE config and capture local 640x360@24fps video + audio before entering queue
+      await Promise.all([fetchIceConfiguration(), ensureLocalMedia()]);
     } else {
       stopLocalMedia();
     }
@@ -460,7 +1421,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
   const handleSkipPartner = () => {
     cleanupPeerConnection();
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'stranger:skip', mode }));
+      wsRef.current.send(JSON.stringify({ type: 'stranger:skip', mode: modeRef.current }));
     }
   };
 
@@ -483,6 +1444,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
       localStreamRef.current.getVideoTracks().forEach((t) => {
         t.enabled = nextState;
       });
+      syncTrackDiagnostics();
     }
     if (activeSessionId && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(
@@ -502,6 +1464,7 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
       localStreamRef.current.getAudioTracks().forEach((t) => {
         t.enabled = nextState;
       });
+      syncTrackDiagnostics();
     }
     if (activeSessionId && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(
@@ -511,6 +1474,19 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
           data: { cameraOn, micOn: nextState },
         })
       );
+    }
+  };
+
+  const handleUnmuteRemoteVideo = () => {
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.muted = false;
+      remoteVideoRef.current.play().catch((err) => {
+        appendDiagnosticEvent(
+          `Manual unmute play() error: ${sanitizeWebRtcErrorMessage(err)}`,
+          true
+        );
+      });
+      setRemoteAudioBlocked(false);
     }
   };
 
@@ -604,11 +1580,11 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
         <div>
           <p className="text-xs font-black text-[#557d27] uppercase tracking-wider">
-            LIVE WEBRTC & DURABLE OBJECT QUEUE
+            LIVE WEBRTC & DURABLE OBJECT QUEUE · 640×360 @ 24FPS (≤500 KBPS)
           </p>
           <h1 className="font-outfit font-extrabold text-3xl md:text-4xl text-[#14201b] mt-1">
             Random Video & Text Chat
@@ -616,9 +1592,22 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowDiagnostics((v) => !v)}
+            className="flex items-center gap-1.5 text-[11px] font-bold text-[#14201b] bg-[#f5f6f2] hover:bg-[#e9ede4] px-3 py-1.5 rounded-full border border-[#d6dfd3]"
+          >
+            <Activity className="w-3.5 h-3.5 text-[#557d27]" />
+            <span>{showDiagnostics ? 'Hide Diagnostics' : 'WebRTC Diagnostics'}</span>
+          </button>
+
           <div className="flex items-center gap-1.5 text-[11px] font-bold text-[#557d27] bg-[#f5f6f2] px-3 py-1.5 rounded-full border border-[#d6dfd3]">
-            <span>📡 Free STUN Mode</span>
-            <span className="text-[#849187]">(TURN optional)</span>
+            <span>
+              {diagnostics.turnConfigured ? '📡 STUN + TURN Relay' : '📡 Free STUN Mode'}
+            </span>
+            {!diagnostics.turnConfigured && (
+              <span className="text-[#849187]">(TURN optional)</span>
+            )}
           </div>
 
           <div
@@ -659,6 +1648,104 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
         </div>
       </div>
 
+      {/* Requirement 8: Visible Diagnostics Panel for signalingState, iceConnectionState, connectionState, tracks, SDP/ICE */}
+      {showDiagnostics && (
+        <div
+          data-testid="webrtc-diagnostics-panel"
+          className="p-4 rounded-2xl bg-[#14201b] text-[#e7ebe5] border border-[#28382f] text-xs space-y-3 shadow-md"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2.5">
+            <div className="flex items-center gap-2 font-extrabold text-[#c5fa5a]">
+              <Activity className="w-4 h-4" />
+              <span>LIVE WEBRTC TELEMETRY & SIGNALING DIAGNOSTICS</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+              <span className="px-2.5 py-0.5 rounded-full bg-white/10 font-bold">
+                Role: <strong className="text-[#c5fa5a]">{diagnostics.role}</strong>
+              </span>
+              <span className="px-2.5 py-0.5 rounded-full bg-white/10 font-bold">
+                Profile: <strong className="text-white">640×360 @ 24fps · ≤500 Kbps</strong>
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+            <div className="p-2.5 rounded-xl bg-white/5 border border-white/10">
+              <p className="text-[10px] uppercase tracking-wider text-[#96a49a]">signalingState</p>
+              <p className="font-mono font-bold text-white mt-0.5">{diagnostics.signalingState}</p>
+            </div>
+            <div className="p-2.5 rounded-xl bg-white/5 border border-white/10">
+              <p className="text-[10px] uppercase tracking-wider text-[#96a49a]">
+                iceConnectionState
+              </p>
+              <p
+                className={`font-mono font-bold mt-0.5 ${
+                  diagnostics.iceConnectionState === 'connected' ||
+                  diagnostics.iceConnectionState === 'completed'
+                    ? 'text-[#c5fa5a]'
+                    : diagnostics.iceConnectionState === 'failed'
+                    ? 'text-red-400'
+                    : 'text-amber-300'
+                }`}
+              >
+                {diagnostics.iceConnectionState}
+              </p>
+            </div>
+            <div className="p-2.5 rounded-xl bg-white/5 border border-white/10">
+              <p className="text-[10px] uppercase tracking-wider text-[#96a49a]">connectionState</p>
+              <p
+                className={`font-mono font-bold mt-0.5 ${
+                  diagnostics.connectionState === 'connected'
+                    ? 'text-[#c5fa5a]'
+                    : diagnostics.connectionState === 'failed'
+                    ? 'text-red-400'
+                    : 'text-white'
+                }`}
+              >
+                {diagnostics.connectionState}
+              </p>
+            </div>
+            <div className="p-2.5 rounded-xl bg-white/5 border border-white/10">
+              <p className="text-[10px] uppercase tracking-wider text-[#96a49a]">SDP Exchange</p>
+              <p className="font-mono font-bold text-[#c5fa5a] mt-0.5 truncate">
+                {diagnostics.sdpStatus}
+              </p>
+            </div>
+            <div className="p-2.5 rounded-xl bg-white/5 border border-white/10">
+              <p className="text-[10px] uppercase tracking-wider text-[#96a49a]">
+                ICE (Sent/Recv/Q/App)
+              </p>
+              <p className="font-mono font-bold text-white mt-0.5">
+                {diagnostics.iceSent} / {diagnostics.iceReceived} / {diagnostics.iceQueued} /{' '}
+                {diagnostics.iceApplied}
+              </p>
+            </div>
+            <div className="p-2.5 rounded-xl bg-white/5 border border-white/10">
+              <p className="text-[10px] uppercase tracking-wider text-[#96a49a]">Tracks (L / R)</p>
+              <p className="font-mono font-bold text-white mt-0.5 truncate" title={`Local: ${diagnostics.localTracksSummary} | Remote: ${diagnostics.remoteTracksSummary}`}>
+                L: {diagnostics.localTracksSummary !== 'none' ? 'Ready' : 'None'} · R:{' '}
+                {diagnostics.remoteTracksSummary !== 'none' ? 'Active' : 'Waiting'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] text-[#b4c0b7] pt-1">
+            <div>
+              <span className="font-bold text-white">Local Tracks:</span>{' '}
+              <span className="font-mono">{diagnostics.localTracksSummary}</span>
+              <span className="mx-2 text-white/30">|</span>
+              <span className="font-bold text-white">Remote Tracks:</span>{' '}
+              <span className="font-mono">{diagnostics.remoteTracksSummary}</span>
+            </div>
+            {diagnostics.events.length > 0 && (
+              <div className="font-mono text-[10px] text-[#c5fa5a] truncate max-w-md">
+                Latest: {diagnostics.events[diagnostics.events.length - 1]}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {wsError && (
         <div className="p-4 rounded-2xl bg-red-950 text-red-100 border border-red-500/40 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-start gap-2.5">
@@ -694,8 +1781,8 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
                 Start a spontaneous conversation.
               </h2>
               <p className="text-sm text-[#bac3be] leading-relaxed">
-                Get paired atomically with another adult in Sri Lanka. Shared interests are
-                prioritized automatically.
+                Get paired atomically with another adult in Sri Lanka. Video streams at 640×360 @
+                24 FPS (capped at 500 Kbps) for smooth, low-latency connections.
               </p>
 
               <div className="flex flex-wrap items-center justify-center gap-3">
@@ -727,10 +1814,31 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
               <p className="text-xs text-[#bac3be] tabular-nums">
                 Waiting in queue: {queueSeconds}s
               </p>
-              {queueSeconds >= 8 && (
+
+              {mode === 'video' && (
+                <div className="w-48 h-28 mx-auto rounded-2xl overflow-hidden border border-white/20 bg-[#17221c] flex items-center justify-center">
+                  {mediaPermissionState === 'granted' && cameraOn ? (
+                    <video
+                      ref={setLocalVideoElement}
+                      autoPlay
+                      muted
+                      playsInline
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <span className="text-[11px] font-bold text-[#bac3be] px-2">
+                      {mediaPermissionState === 'unavailable'
+                        ? 'Camera permission needed'
+                        : 'Camera preview'}
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {queueSeconds >= 6 && (
                 <p className="text-xs text-[#dff4b3] bg-white/10 p-3 rounded-xl">
-                  Tip: Open a second browser tab logged into another account to test real-time
-                  peer-to-peer WebRTC & WebSocket pairing immediately.
+                  Tip: Open a second browser window logged into another account to test live
+                  peer-to-peer WebRTC video & audio immediately.
                 </p>
               )}
               <button
@@ -746,56 +1854,84 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
           {stage === 'matched' && (
             <>
               {mode === 'video' ? (
-                <div className="relative flex-1 bg-black flex items-center justify-center">
+                <div className="relative flex-1 bg-black flex items-center justify-center min-h-[380px]">
                   <video
-                    ref={remoteVideoRef}
+                    ref={setRemoteVideoElement}
                     autoPlay
                     playsInline
                     className="w-full h-full object-cover"
                   />
 
-                  {webrtcError && (
-                    <div className="absolute inset-x-4 top-16 z-20 p-4 rounded-2xl bg-amber-950/90 border border-amber-500/40 text-amber-100 text-xs shadow-2xl backdrop-blur-md space-y-2">
-                      <div className="flex items-center gap-2 font-black text-amber-300">
-                        <ShieldAlert className="w-4 h-4 text-amber-400" />
-                        <span>WebRTC Connection Notice (STUN Mode)</span>
-                      </div>
-                      <p className="leading-relaxed">
-                        {webrtcError}
+                  {!diagnostics.remoteVideoReady && !webrtcError && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#101417]/80 pointer-events-none p-6 text-center space-y-2">
+                      <p className="text-sm font-extrabold text-[#c5fa5a]">
+                        Connecting video stream with {partner?.displayName}...
                       </p>
-                      <div className="text-[11px] text-amber-300/80 pt-1">
-                        In development mode, public STUN (Cloudflare/Google) is used without paid TURN relays. Peer-to-peer works over open NAT, but symmetric NAT firewalls require TURN. Text chat remains functional!
-                      </div>
+                      <p className="text-xs text-[#bac3be] font-mono">
+                        SDP: {diagnostics.sdpStatus} · ICE: {diagnostics.iceConnectionState}
+                      </p>
                     </div>
                   )}
 
-                  <div className="absolute top-4 left-4 bg-[#101417]/80 px-4 py-2 rounded-full border border-white/15 text-xs font-bold flex flex-wrap items-center gap-2">
+                  {remoteAudioBlocked && (
+                    <button
+                      type="button"
+                      onClick={handleUnmuteRemoteVideo}
+                      className="absolute bottom-20 left-4 z-30 px-4 py-2.5 rounded-xl bg-[#c5fa5a] text-[#14201b] font-black text-xs shadow-lg inline-flex items-center gap-2 hover:bg-[#d2ff75]"
+                    >
+                      <Volume2 className="w-4 h-4" />
+                      <span>Tap to Unmute Partner Audio</span>
+                    </button>
+                  )}
+
+                  {/* Requirement 12: Clear error state when ICE fails or no relay is available */}
+                  {webrtcError && (
+                    <div className="absolute inset-x-4 top-16 z-20 p-4 rounded-2xl bg-amber-950/95 border border-amber-500/40 text-amber-100 text-xs shadow-2xl backdrop-blur-md space-y-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 font-black text-amber-300">
+                          <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+                          <span>WebRTC Media Connection Error</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleRetryVideoNegotiation}
+                          className="px-3 py-1.5 rounded-lg bg-[#c5fa5a] text-[#14201b] font-black text-[11px] inline-flex items-center gap-1 hover:bg-[#d2ff75]"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          <span>Retry Video</span>
+                        </button>
+                      </div>
+                      <p className="leading-relaxed">{webrtcError}</p>
+                    </div>
+                  )}
+
+                  <div className="absolute top-4 left-4 bg-[#101417]/85 px-4 py-2 rounded-full border border-white/15 text-xs font-bold flex flex-wrap items-center gap-2 z-10">
                     <span className="text-[#c5fa5a]">●</span>
                     <span>{partner?.displayName}</span>
                     {partner?.region && <span> · {partner.region}</span>}
                     {!partnerMedia.cameraOn && (
                       <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/20 text-red-200">
-                        Camera Off
+                        Partner Camera Off
                       </span>
                     )}
                     {!partnerMedia.micOn && (
                       <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/20 text-red-200">
-                        Muted
+                        Partner Muted
                       </span>
                     )}
                     <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/10 text-[#c5fa5a]">
                       {iceState === 'connected' || iceState === 'completed'
-                        ? 'P2P Live'
+                        ? 'P2P Live (640×360)'
                         : iceState === 'failed'
-                        ? 'P2P Blocked'
-                        : 'P2P Negotiating'}
+                        ? 'ICE Failed'
+                        : `ICE: ${iceState}`}
                     </span>
                   </div>
 
-                  <div className="absolute bottom-4 right-4 w-36 h-24 rounded-2xl overflow-hidden border-2 border-white/25 bg-[#17221c] flex items-center justify-center">
+                  <div className="absolute bottom-4 right-4 w-40 h-24 rounded-2xl overflow-hidden border-2 border-white/25 bg-[#17221c] flex items-center justify-center z-10 shadow-lg">
                     {mediaPermissionState === 'granted' && cameraOn ? (
                       <video
-                        ref={localVideoRef}
+                        ref={setLocalVideoElement}
                         autoPlay
                         muted
                         playsInline
@@ -803,7 +1939,9 @@ export const RandomChatStudio: React.FC<RandomChatStudioProps> = ({
                       />
                     ) : (
                       <span className="text-[11px] font-bold text-[#bac3be] px-2 text-center">
-                        {mediaPermissionState === 'unavailable' ? 'No camera detected' : 'Camera Off'}
+                        {mediaPermissionState === 'unavailable'
+                          ? 'No camera detected'
+                          : 'Camera Off'}
                       </span>
                     )}
                   </div>
