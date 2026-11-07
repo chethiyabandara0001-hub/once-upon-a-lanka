@@ -1,9 +1,31 @@
 /**
  * ONCE UPON A TIME (OUAT) — CLOUDFLARE WORKER ENTRYPOINT
- * Serves the compiled React SPA from dist/ and exports MatchmakerDurableObject for Cloudflare.
+ * Serves the compiled React SPA from dist/ and exports a dependency-free
+ * MatchmakerDurableObject class for Cloudflare deployment compatibility.
  */
 
-export { MatchmakerDurableObject } from './matchmaker-do';
+export class MatchmakerDurableObject {
+  state: unknown;
+  env: Env;
+
+  constructor(state: unknown, env: Env) {
+    this.state = state;
+    this.env = env;
+  }
+
+  async fetch(): Promise<Response> {
+    return new Response(
+      JSON.stringify({
+        status: 'migrated',
+        message: 'Matchmaking now operates directly on Firebase Cloud Firestore.',
+      }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+}
 
 export interface Env {
   ASSETS?: {

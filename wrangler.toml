@@ -5,6 +5,7 @@
 name = "once-upon-a-lanka"
 main = "cloudflare/worker.ts"
 compatibility_date = "2026-03-01"
+compatibility_flags = ["nodejs_compat"]
 
 # ----------------------------------------------------------------------------
 # AUTOMATIC BUILD HOOK
