@@ -8,6 +8,13 @@ compatibility_date = "2026-03-01"
 compatibility_flags = ["nodejs_compat"]
 
 # ----------------------------------------------------------------------------
+# AUTOMATIC BUILD HOOK
+# Ensures `vite build` runs automatically whenever `npx wrangler deploy` executes.
+# ----------------------------------------------------------------------------
+[build]
+command = "npm run build"
+
+# ----------------------------------------------------------------------------
 # STATIC ASSETS CONFIGURATION
 # Serves the compiled React Vite frontend from dist/ with SPA client-side
 # routing fallback for deep-links (/login, /signup, /dashboard, /discover, etc.)

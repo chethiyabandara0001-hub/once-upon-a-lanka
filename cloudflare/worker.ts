@@ -116,7 +116,7 @@ const EDGE_USERS: Map<string, EdgeUser> = new Map([
       role: 'member',
       membership: { status: 'active', expiresAt: '2027-12-31T00:00:00Z', plan: 'dev_test_30d' },
       profile: {
-        avatarUrl: '/src/assets/images/editorial_portrait_amaya_1793978349712.jpg',
+        avatarUrl: '/src/assets/images/editorial_portrait_amaya_1793978349458.jpg',
         bio: 'Documentary archivist & tea enthusiast. Weekends spent browsing antique bookshops in Galle Fort.',
         region: 'Colombo 07',
         showRegion: true,
@@ -182,7 +182,7 @@ const EDGE_USERS: Map<string, EdgeUser> = new Map([
       role: 'member',
       membership: { status: 'active', expiresAt: '2027-12-31T00:00:00Z', plan: 'dev_test_30d' },
       profile: {
-        avatarUrl: '/src/assets/images/editorial_portrait_ehan_1793978351420.jpg',
+        avatarUrl: '/src/assets/images/editorial_portrait_ehan_1793978352895.jpg',
         bio: 'Sound designer & record collector. Chasing monsoon recordings and old Ceylon vinyls.',
         region: 'Jaffna',
         showRegion: true,
@@ -375,7 +375,7 @@ async function handleApiRequest(request: Request, env: Env, url: URL): Promise<R
         role: 'member',
         membership: { status: 'active', expiresAt: '2027-12-31T00:00:00Z', plan: 'dev_test_30d' },
         profile: {
-          avatarUrl: '/src/assets/images/editorial_portrait_amaya_1793978349712.jpg',
+          avatarUrl: '/src/assets/images/editorial_portrait_amaya_1793978349458.jpg',
           bio: 'New member discovering stories on Once Upon a Time.',
           region: 'Colombo',
           showRegion: true,
