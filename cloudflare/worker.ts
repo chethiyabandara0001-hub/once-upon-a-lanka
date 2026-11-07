@@ -1,12 +1,15 @@
 /**
- * ONCE UPON A TIME (OUAT) — STANDALONE STATIC ASSETS WORKER ENTRYPOINT
- * All backend and payment features are disconnected; serves the compiled React SPA from dist/.
+ * ONCE UPON A TIME (OUAT) — CLOUDFLARE WORKER ENTRYPOINT
+ * Serves the compiled React SPA from dist/ and exports MatchmakerDurableObject for Cloudflare.
  */
+
+export { MatchmakerDurableObject } from './matchmaker-do';
 
 export interface Env {
   ASSETS?: {
     fetch(request: Request | string): Promise<Response>;
   };
+  MATCHMAKER?: unknown;
 }
 
 export default {

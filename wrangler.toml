@@ -22,3 +22,13 @@ command = "npm run build"
 directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
+
+# ----------------------------------------------------------------------------
+# DURABLE OBJECTS CONFIGURATION
+# Preserves MatchmakerDurableObject export required by Cloudflare deployment
+# ----------------------------------------------------------------------------
+[durable_objects]
+bindings = [
+  { name = "MATCHMAKER", class_name = "MatchmakerDurableObject" }
+]
+
